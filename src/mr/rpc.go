@@ -23,6 +23,19 @@ type ExampleReply struct {
 }
 
 // Add your RPC definitions here.
+type AssignWorkArgs struct {
+
+}
+
+type AssignWorkReply struct {
+	TaskType string
+	TaskIdx int
+	// variable used in map phase
+	MapFile string
+	NReduce int
+	// variable used in reduce phase
+	NumMapFiles int
+}
 
 
 // Cook up a unique-ish UNIX-domain socket name
