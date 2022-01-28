@@ -52,9 +52,10 @@ func (m *Master) Example(args *ExampleArgs, reply *ExampleReply) error {
 	return nil
 }
 
+// The worker uses this function to ask for a work
 func (m *Master) AssignWork(args *AssignWorkArgs, reply *AssignWorkReply) error {
 	// reply workers with task information
-	// 1. update current information if possible
+	// 1. update current master's information if possible
 	m.mu.Lock()
 	num_tasks_finished := len(m.finished_tasks)
 	if num_tasks_finished == m.num_total_tasks {
@@ -90,6 +91,7 @@ func (m *Master) AssignWork(args *AssignWorkArgs, reply *AssignWorkReply) error 
 	return nil
 }
 
+// The worker uses this function to remind master that its work has been finished successfully
 func (m *Master) FinishWork(args *AssignWorkReply, reply *AssignWorkArgs) error {
 	task_idx := args.TaskIdx
 	m.mu.Lock()
@@ -97,7 +99,6 @@ func (m *Master) FinishWork(args *AssignWorkReply, reply *AssignWorkArgs) error 
 	m.mu.Unlock()
 	return nil
 }
-
 
 //
 // start a thread that listens for RPCs from worker.go
@@ -149,7 +150,7 @@ func MakeMaster(files []string, nReduce int) *Master {
 }
 
 
-// load files for map phase for Master
+// update master's information for map phase
 func loadMapFiles(m *Master, files *[]string) {
 	for index, filename := range *files {
 		m.map_files = append(m.map_files, filename)
@@ -158,6 +159,7 @@ func loadMapFiles(m *Master, files *[]string) {
 	m.num_total_tasks = len(m.map_files)
 } 
 
+// update master's information for reduce phase
 func loadReduceInfo(m *Master) {
 	m.status = status_reduce
 	m.num_total_tasks = m.nReduce
@@ -167,6 +169,7 @@ func loadReduceInfo(m *Master) {
 	} 
 }
 
+// wait for completenss of task[TaskIdx] with at most seconds; If fails to complete, add task back
 func waitWork(m *Master, TaskIdx int) {
 	seconds := 10
 	time.Sleep(time.Duration(seconds) *time.Second)
@@ -180,9 +183,11 @@ func waitWork(m *Master, TaskIdx int) {
 	m.mu.Unlock()
 }
 
+// get a random key from set (or map[int]bool)
 func get_some_key(m map[int]bool) int {
     for k := range m {
         return k
     }
     return 0
 }
+

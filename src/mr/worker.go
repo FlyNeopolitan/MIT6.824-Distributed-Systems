@@ -74,6 +74,7 @@ func Worker(mapf func(string, string) []KeyValue,
 
 }
 
+// get a task from master
 func getTask() AssignWorkReply{
 	args := AssignWorkArgs{}
 	reply := AssignWorkReply{}
@@ -83,9 +84,9 @@ func getTask() AssignWorkReply{
 	return reply
 }
 
+// try to finish a map task, and notify master when it's done
 func apply_map(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string, task_info AssignWorkReply) {
-	//fmt.Printf("starts map!\n")
 	// map contents
 	filename := task_info.MapFile
 	file, err := os.Open(filename)
@@ -123,27 +124,33 @@ func apply_map(mapf func(string, string) []KeyValue,
 	replyDone(task_info)
 }
 
+// try to finish a reduce task, and notify master when it's done
 func apply_reduce(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string, task_info AssignWorkReply) {
-
+	// read all related input files for reduce
 	kva := []KeyValue{}
 	for i := 0; i < task_info.NumMapFiles; i++ {
 		tempName := tempFileName(std_prefix, i, task_info.TaskIdx)
 		readJsonFile(tempName, &kva)
 	}
 	processID := strconv.Itoa(os.Getpid())
+	// perform reduce and write output to temp files
 	performReduce(&kva, reducef, task_info.TaskIdx)
+	// change file names 
 	current := fmt.Sprintf("%s-out-%d", processID, task_info.TaskIdx)
 	target := fmt.Sprintf("%s-out-%d", std_prefix, task_info.TaskIdx)
 	changeFileName(current, target)
+	// done!
 	replyDone(task_info)
 }
 
+// Given prefix and according idx, provide a temporary file name
 func tempFileName(prefix string, mapTaskIndex int, reduceTaskIndex int) (res string) {
 	res = fmt.Sprintf("%s-%d-%d", prefix, mapTaskIndex, reduceTaskIndex)
 	return 
 }
 
+// Notify master the task it's done
 func replyDone(args AssignWorkReply) {
 	reply := AssignWorkArgs{}
 	call("Master.FinishWork", &args, &reply)
@@ -195,7 +202,7 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 	return false
 }
 
-
+// Read Json file into an array of key-value pairs
 func readJsonFile(filename string, kva *[]KeyValue) {
 	file, _ := os.Open(filename)
 	dec := json.NewDecoder(file)
@@ -208,6 +215,7 @@ func readJsonFile(filename string, kva *[]KeyValue) {
 	}
 }
 
+// perform reduce for given array of key-value pairs, and write output into temporary files
 func performReduce(intermediate* []KeyValue, reducef func(string, []string) string, task_idx int) {
 	sort.Sort(ByKey(*intermediate))
 	processID := strconv.Itoa(os.Getpid())
@@ -239,6 +247,7 @@ func performReduce(intermediate* []KeyValue, reducef func(string, []string) stri
 	ofile.Close()
 }
 
+// change file with current name to target name
 func changeFileName(current, target string) {
 	if _, err := os.Stat(current); err == nil { //if current file exists
 		os.Rename(current, target)
