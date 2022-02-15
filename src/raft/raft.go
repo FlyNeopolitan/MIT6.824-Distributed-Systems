@@ -19,13 +19,15 @@ package raft
 
 import (
 	//"crypto/rand"
+	//"fmt"
 	"math"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"../labrpc"
 	"math/rand"
+
+	"../labrpc"
 )
 
 // import "bytes"
@@ -36,11 +38,11 @@ var (
 	follower  = "followers"
 	candidate = "candidate"
 	leader    = "leader"
-	ElectionTimeoutLowerBound = 10  // To do
-	ElectionTimeoutUpperBound = 10
-	CandidateTimeoutLowerBound = 10
-	CandidateTimeoutUpperBound = 10
-	HeartBeatsRate = 10
+	ElectionTimeoutLowerBound = 600   // ms
+	ElectionTimeoutUpperBound = 1000 // ms
+	CandidateTimeoutLowerBound = 600  // ms
+	CandidateTimeoutUpperBound = 1000 // ms
+	HeartBeatsRate = 100              // ms
 	Max = func (a, b int) int {return int(math.Max(float64(a), float64(b)))}
 )
 
@@ -107,14 +109,6 @@ type Clock struct {
 	timeLimit    int        // when time reaches time Limit, the clock would remind sleeping thread
 	kill         bool       // set to true to kill the background clock
 }
-
-/*
-type Clock struct {
-	count int        // current time, in ms
-	mu    sync.Mutex // mutex
-	cond  *sync.Cond // conditional variables
-}
-*/
  
 // return currentTerm and whether this server
 // believes it is the leader.
@@ -200,22 +194,21 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
-	rf.currentTerm = Max(rf.currentTerm, args.Term)
+	reply.VoteGranted = false
+	if (rf.votedFor == -1 || rf.votedFor == args.CandiateId) && rf.upToDate(args) {
+		reply.VoteGranted = true
+		rf.votedFor = args.CandiateId
+	}
 	reply.Term = rf.currentTerm
-	if args.Term < rf.currentTerm {
-		reply.VoteGranted = false
-	} else {
-		if (rf.votedFor == -1 || rf.votedFor == args.CandiateId) && rf.upToDate(args) {
-			reply.VoteGranted = true
-			rf.votedFor = args.CandiateId
-		}
+	if rf.currentTerm < args.Term {
+		rf.toFollower(args.Term)
 	}
 	rf.mu.Unlock()
 }
 
 // (2B)
 func (rf *Raft) upToDate(args *RequestVoteArgs) (bool) {
-	return true
+	return rf.currentTerm <= args.Term
 }
 
 //
@@ -265,11 +258,11 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.clock.reset() // reset timing for timeout
 	rf.mu.Lock()
-	if rf.currentTerm < args.Term {
-		rf.toFollower(args.Term)
-		rf.mu.Unlock()
-	}
 	reply.Term = rf.currentTerm
+	if rf.currentTerm < args.Term || rf.serverType == candidate {
+		rf.toFollower(args.Term)
+	}
+	rf.mu.Unlock()
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -345,6 +338,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 	rand.Seed(time.Now().UnixNano())
+	rf.serverType, rf.currentTerm, rf.votedFor = follower, 1, -1
 	rf.clock.createClock()
 	go rf.timeoutCheck()
 	// initialize from state persisted before a crash
@@ -388,7 +382,7 @@ func (rf *Raft) startElection() {
 	rf.mu.Unlock()
 	rf.clock.reset()
 	// (4)
-	counts := 1
+	counts := 0
 	for peer := range rf.peers {
 		args := RequestVoteArgs{CandiateId: rf.me, Term: rf.currentTerm}
 		reply := RequestVoteReply{}
@@ -419,7 +413,7 @@ func (rf *Raft) startHeartBeat() {
 			break
 		}
 		for peer := range rf.peers {
-			go func(server int) {
+			heartbeat := func(server int) {
 				args := AppendEntriesArgs{Term: rf.currentTerm}
 				reply := AppendEntriesReply{}
 				if rf.sendAppendEntries(server, &args, &reply) {
@@ -429,8 +423,12 @@ func (rf *Raft) startHeartBeat() {
 					}
 					rf.mu.Unlock()
 				}
-			}(peer)
+			}
+			if peer != rf.me {
+				go heartbeat(peer)
+			}
 		}
+		time.Sleep(time.Duration(HeartBeatsRate) * time.Millisecond)
 	}
 }
 
@@ -460,18 +458,17 @@ func (clock *Clock) createClock() {
 	clock.timeLimit = MaxInt
 	clock.kill      = false
 	go func () {
-		defer clock.clockMu.Unlock()
 		for {
-			time.Sleep(time.Millisecond)
-			clock.clockMu.Lock()
+			time.Sleep(time.Duration(50) * time.Millisecond)
 			if clock.kill {
 				break
 			}
-			clock.clockTime += 1
+			clock.clockMu.Lock()
+			clock.clockTime += 50
+			clock.clockMu.Unlock()
 			if (clock.clockTime >= clock.timeLimit) {
 				clock.clockCond.Broadcast()
 			}
-			clock.clockMu.Unlock()
 		}
 	} ()
 }
@@ -480,7 +477,7 @@ func (clock *Clock) createClock() {
 func (clock *Clock) wait(timeLimit int) {
 	clock.clockMu.Lock()
 	clock.clockTime, clock.timeLimit = 0, timeLimit
-	for current := clock.timeLimit; current < clock.timeLimit; {
+	for clock.clockTime < clock.timeLimit {
 		clock.clockCond.Wait()
 	}
 	clock.clockMu.Unlock()
@@ -490,8 +487,8 @@ func (clock *Clock) wait(timeLimit int) {
 func (clock *Clock) killClock() {
 	clock.clockMu.Lock()
 	clock.kill = true
-	clock.clean()
 	clock.clockMu.Unlock()
+	clock.clean()
 }
 
 /******************************************** Tiny Helpers ***********************************/
@@ -501,11 +498,11 @@ func randInt(min int, max int) (int) {
 }
 
 func (rf *Raft) continueElection(oldTerm int) bool{
-	return rf.serverType == candidate && oldTerm == rf.currentTerm 
+	return rf.serverType == candidate && oldTerm == rf.currentTerm && !rf.killed()
 }
 
 func (rf *Raft) hasMajorVotes(counts int) bool {
-	return counts >= int(math.Ceil(float64(len(rf.peers)) / 2.0))
+	return counts >= 1 + int(math.Floor(float64(len(rf.peers)) / 2.0)) && !rf.killed()
 }
 
 func (rf *Raft) continueHeartBeat(oldTerm int) bool {
@@ -518,6 +515,7 @@ func (rf *Raft) continueHeartBeat(oldTerm int) bool {
 func (rf *Raft) toLeader() {
 	rf.clock.clean()
 	rf.serverType = leader
+	rf.votedFor = -1
 	go rf.startHeartBeat()
 }
 
