@@ -17,13 +17,32 @@ package raft
 //   in the same server.
 //
 
-import "sync"
-import "sync/atomic"
-import "../labrpc"
+import (
+	//"crypto/rand"
+	"math"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"../labrpc"
+	"math/rand"
+)
 
 // import "bytes"
 // import "../labgob"
 
+var (
+	MaxInt = math.MaxInt32 
+	follower  = "followers"
+	candidate = "candidate"
+	leader    = "leader"
+	ElectionTimeoutLowerBound = 10  // To do
+	ElectionTimeoutUpperBound = 10
+	CandidateTimeoutLowerBound = 10
+	CandidateTimeoutUpperBound = 10
+	HeartBeatsRate = 10
+	Max = func (a, b int) int {return int(math.Max(float64(a), float64(b)))}
+)
 
 
 //
@@ -54,11 +73,49 @@ type Raft struct {
 	dead      int32               // set by Kill()
 
 	// Your data here (2A, 2B, 2C).
+	// logic control data
+	serverType   string     // type of server: follower, candidate or leader
+	clock        Clock      // Clock
+	// Persistent state on all servers
+	currentTerm  int   // latest term server has seen 
+	votedFor	 int   // candidate that received vote in current term
+	logs         []Log // log entries; each entry contains command and term when entry was received by leader
+
+	// Volatile state on all servers
+	commitIndex  int    // index of highest log entry known to be committed
+	lastApplied  int    // index of highest log entry applied to state machine
+
+	// Volatile state on leaders
+	nextIndex    []int // index of next log entry to send to the server for each server
+	matchIndex   []int // index of highest log entry knwon to be replicated on server for each server
+	
+
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
 }
 
+type Log struct {
+	Command 	 interface{}
+	TermReceived int
+}
+
+type Clock struct {
+	clockTime    int        // current time in clock (in ms)
+	clockMu      sync.Mutex // clock's mutex
+	clockCond    *sync.Cond // clock's conditional variables
+	timeLimit    int        // when time reaches time Limit, the clock would remind sleeping thread
+	kill         bool       // set to true to kill the background clock
+}
+
+/*
+type Clock struct {
+	count int        // current time, in ms
+	mu    sync.Mutex // mutex
+	cond  *sync.Cond // conditional variables
+}
+*/
+ 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
@@ -66,6 +123,10 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (2A).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	term = rf.currentTerm
+	isleader = rf.serverType == leader
 	return term, isleader
 }
 
@@ -117,6 +178,10 @@ func (rf *Raft) readPersist(data []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	Term         int // candidate's term
+	CandiateId   int // candidate requesting vote
+	LastLogIndex int // index of candidate's last log entry
+	LastLogTerm  int // term of candidates' last log entry
 }
 
 //
@@ -125,6 +190,8 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+	Term        int  // currentTerm, for candiate to update itself
+	VoteGranted bool // true means candiate received vote
 }
 
 //
@@ -132,6 +199,23 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	rf.mu.Lock()
+	rf.currentTerm = Max(rf.currentTerm, args.Term)
+	reply.Term = rf.currentTerm
+	if args.Term < rf.currentTerm {
+		reply.VoteGranted = false
+	} else {
+		if (rf.votedFor == -1 || rf.votedFor == args.CandiateId) && rf.upToDate(args) {
+			reply.VoteGranted = true
+			rf.votedFor = args.CandiateId
+		}
+	}
+	rf.mu.Unlock()
+}
+
+// (2B)
+func (rf *Raft) upToDate(args *RequestVoteArgs) (bool) {
+	return true
 }
 
 //
@@ -165,6 +249,31 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	return ok
+}
+
+type AppendEntriesArgs struct {
+	Term int // leader’s term
+	
+}
+
+type AppendEntriesReply struct {
+	Term    int  // current Term, for leader to update itself
+	Success bool // true if follower contained entry matching prevLogIndex and pREVlOGtERM
+}
+
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.clock.reset() // reset timing for timeout
+	rf.mu.Lock()
+	if rf.currentTerm < args.Term {
+		rf.toFollower(args.Term)
+		rf.mu.Unlock()
+	}
+	reply.Term = rf.currentTerm
+}
+
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
 
@@ -208,6 +317,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+	rf.clock.killClock()  //kill all waiting clock threads!
 }
 
 func (rf *Raft) killed() bool {
@@ -234,10 +344,190 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
-
+	rand.Seed(time.Now().UnixNano())
+	rf.clock.createClock()
+	go rf.timeoutCheck()
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 
 	return rf
 }
+
+func (rf *Raft) timeoutCheck() {
+	for {
+		if rf.killed() {
+			break
+		}
+		timeLimit := MaxInt
+		switch rf.serverType {
+		case follower:
+			timeLimit = randInt(ElectionTimeoutLowerBound, ElectionTimeoutUpperBound)
+			rf.clock.wait(timeLimit)
+			rf.serverType = candidate
+		case candidate:
+			go rf.startElection()
+			timeLimit = randInt(CandidateTimeoutLowerBound, CandidateTimeoutUpperBound)
+			rf.clock.wait(timeLimit)
+		case leader: // don't need to perform timeout check!
+			rf.clock.wait(timeLimit)
+		}
+	}
+}
+
+
+// The function will start election for candidate:
+// 1.Increment currentTerm 2.Vote for self 3.Reset election timer 
+// 4.Send RequestVote RPCs to all other servers
+func (rf *Raft) startElection() {
+	// (1), (2), (3)
+	rf.mu.Lock()
+	rf.currentTerm += 1
+	oldTerm := rf.currentTerm
+	rf.votedFor = rf.me
+	rf.mu.Unlock()
+	rf.clock.reset()
+	// (4)
+	counts := 1
+	for peer := range rf.peers {
+		args := RequestVoteArgs{CandiateId: rf.me, Term: rf.currentTerm}
+		reply := RequestVoteReply{}
+		go func(server int) {
+			if (rf.sendRequestVote(server, &args, &reply)) {
+				rf.mu.Lock()
+				if (reply.Term > rf.currentTerm) { // convert to follower
+					rf.toFollower(reply.Term)
+				}
+				if reply.VoteGranted { // check if we have the major votes and convert to leader
+					counts += 1
+					if rf.continueElection(oldTerm) && rf.hasMajorVotes(counts) {
+						rf.toLeader()
+					}
+				}
+				rf.mu.Unlock()
+			}
+		}(peer)	
+	}
+}
+
+func (rf *Raft) startHeartBeat() {
+	rf.mu.Lock()
+	oldTerm := rf.currentTerm
+	rf.mu.Unlock()
+	for {
+		if !rf.continueHeartBeat(oldTerm) {
+			break
+		}
+		for peer := range rf.peers {
+			go func(server int) {
+				args := AppendEntriesArgs{Term: rf.currentTerm}
+				reply := AppendEntriesReply{}
+				if rf.sendAppendEntries(server, &args, &reply) {
+					rf.mu.Lock()
+					if reply.Term > rf.currentTerm {
+						rf.toFollower(reply.Term)
+					}
+					rf.mu.Unlock()
+				}
+			}(peer)
+		}
+	}
+}
+
+/***************************** clock related functions ********************************/
+
+// try to reset the clock timing
+// will NOT clean ANY waiting threads on clock
+func (clock Clock) reset() {
+	clock.clockMu.Lock()
+	clock.clockTime = 0
+	clock.clockMu.Unlock()
+}
+
+// will clean ALL waiting threads on clock
+func (clock Clock) clean() {
+	clock.clockMu.Lock()
+	clock.timeLimit = 0
+	clock.clockCond.Broadcast()
+	clock.clockMu.Unlock()
+}
+
+// initialize the clock
+// create a background clock that will try to wake up any waiting threads on clock once time has reached upper liits
+func (clock *Clock) createClock() {
+	clock.clockTime = 0
+	clock.clockCond = sync.NewCond(&clock.clockMu)
+	clock.timeLimit = MaxInt
+	clock.kill      = false
+	go func () {
+		defer clock.clockMu.Unlock()
+		for {
+			time.Sleep(time.Millisecond)
+			clock.clockMu.Lock()
+			if clock.kill {
+				break
+			}
+			clock.clockTime += 1
+			if (clock.clockTime >= clock.timeLimit) {
+				clock.clockCond.Broadcast()
+			}
+			clock.clockMu.Unlock()
+		}
+	} ()
+}
+
+// sleep/wait until clock has reached time limit
+func (clock *Clock) wait(timeLimit int) {
+	clock.clockMu.Lock()
+	clock.clockTime, clock.timeLimit = 0, timeLimit
+	for current := clock.timeLimit; current < clock.timeLimit; {
+		clock.clockCond.Wait()
+	}
+	clock.clockMu.Unlock()
+}
+
+// kill all clock-related threads
+func (clock *Clock) killClock() {
+	clock.clockMu.Lock()
+	clock.kill = true
+	clock.clean()
+	clock.clockMu.Unlock()
+}
+
+/******************************************** Tiny Helpers ***********************************/
+
+func randInt(min int, max int) (int) {
+	return rand.Intn(max - min) + min
+}
+
+func (rf *Raft) continueElection(oldTerm int) bool{
+	return rf.serverType == candidate && oldTerm == rf.currentTerm 
+}
+
+func (rf *Raft) hasMajorVotes(counts int) bool {
+	return counts >= int(math.Ceil(float64(len(rf.peers)) / 2.0))
+}
+
+func (rf *Raft) continueHeartBeat(oldTerm int) bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.serverType == leader && oldTerm == rf.currentTerm
+}
+
+// only candidate can become leader
+func (rf *Raft) toLeader() {
+	rf.clock.clean()
+	rf.serverType = leader
+	go rf.startHeartBeat()
+}
+
+// candidate, follower, leads all could be folloer
+func (rf *Raft) toFollower(newTerm int) {
+	/* to Follower */
+	rf.clock.clean()
+	rf.currentTerm = newTerm
+	rf.serverType = follower
+	rf.votedFor = -1
+}
+
+
