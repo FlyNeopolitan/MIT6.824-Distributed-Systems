@@ -122,7 +122,6 @@ func (rf *Raft) GetState() (int, bool) {
 	defer rf.mu.Unlock()
 	term = rf.currentTerm
 	isleader = rf.serverType == leader
-	//fmt.Println("check leader ", rf.me, rf.currentTerm, rf.serverType, isleader)
 	return term, isleader
 }
 
@@ -383,7 +382,6 @@ func (rf *Raft) startElection() {
 	rf.votedFor = rf.me
 	rf.mu.Unlock()
 	rf.clock.reset()
-	//fmt.Println("new candidate", rf.me, " ", rf.currentTerm)
 	// (4)
 	counts := 0
 	for peer := range rf.peers {
@@ -396,10 +394,8 @@ func (rf *Raft) startElection() {
 					rf.toFollower(reply.Term)
 				}
 				if reply.VoteGranted { // check if we have the major votes and convert to leader
-					//fmt.Println(rf.me, rf.currentTerm, "receives votes from ", peer)
 					counts += 1
 					if rf.continueElection(oldTerm) && rf.hasMajorVotes(counts) {
-						//fmt.Println(counts, rf.currentTerm, )
 						rf.toLeader()
 					}
 				}
@@ -522,7 +518,6 @@ func (rf *Raft) toLeader() {
 	rf.serverType = leader
 	rf.votedFor = -1
 	go rf.startHeartBeat()
-	//fmt.Println("new leader ", rf.me, " ", rf.currentTerm)
 }
 
 // candidate, follower, leads all could be folloer
@@ -532,7 +527,6 @@ func (rf *Raft) toFollower(newTerm int) {
 	rf.currentTerm = newTerm
 	rf.serverType = follower
 	rf.votedFor = -1
-	//fmt.Println("new follower ", rf.me, " ", rf.currentTerm)
 }
 
 
