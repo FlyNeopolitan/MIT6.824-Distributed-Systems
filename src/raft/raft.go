@@ -34,15 +34,16 @@ import (
 // import "../labgob"
 
 var (
+	CLOCK_UNIT = 50 // ms
 	MaxInt = math.MaxInt32 
 	follower  = "followers"
 	candidate = "candidate"
 	leader    = "leader"
-	ElectionTimeoutLowerBound = 600   // ms
+	ElectionTimeoutLowerBound = 500   // ms
 	ElectionTimeoutUpperBound = 1000 // ms
-	CandidateTimeoutLowerBound = 600  // ms
+	CandidateTimeoutLowerBound = 500  // ms
 	CandidateTimeoutUpperBound = 1000 // ms
-	HeartBeatsRate = 100              // ms
+	HeartBeatsRate = 150              // ms
 	Max = func (a, b int) int {return int(math.Max(float64(a), float64(b)))}
 )
 
@@ -121,6 +122,7 @@ func (rf *Raft) GetState() (int, bool) {
 	defer rf.mu.Unlock()
 	term = rf.currentTerm
 	isleader = rf.serverType == leader
+	//fmt.Println("check leader ", rf.me, rf.currentTerm, rf.serverType, isleader)
 	return term, isleader
 }
 
@@ -195,14 +197,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	reply.VoteGranted = false
+	if rf.currentTerm < args.Term {
+		rf.toFollower(args.Term)
+	}
 	if (rf.votedFor == -1 || rf.votedFor == args.CandiateId) && rf.upToDate(args) {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandiateId
 	}
 	reply.Term = rf.currentTerm
-	if rf.currentTerm < args.Term {
-		rf.toFollower(args.Term)
-	}
 	rf.mu.Unlock()
 }
 
@@ -381,6 +383,7 @@ func (rf *Raft) startElection() {
 	rf.votedFor = rf.me
 	rf.mu.Unlock()
 	rf.clock.reset()
+	//fmt.Println("new candidate", rf.me, " ", rf.currentTerm)
 	// (4)
 	counts := 0
 	for peer := range rf.peers {
@@ -393,8 +396,10 @@ func (rf *Raft) startElection() {
 					rf.toFollower(reply.Term)
 				}
 				if reply.VoteGranted { // check if we have the major votes and convert to leader
+					//fmt.Println(rf.me, rf.currentTerm, "receives votes from ", peer)
 					counts += 1
 					if rf.continueElection(oldTerm) && rf.hasMajorVotes(counts) {
+						//fmt.Println(counts, rf.currentTerm, )
 						rf.toLeader()
 					}
 				}
@@ -436,14 +441,14 @@ func (rf *Raft) startHeartBeat() {
 
 // try to reset the clock timing
 // will NOT clean ANY waiting threads on clock
-func (clock Clock) reset() {
+func (clock *Clock) reset() {
 	clock.clockMu.Lock()
 	clock.clockTime = 0
 	clock.clockMu.Unlock()
 }
 
 // will clean ALL waiting threads on clock
-func (clock Clock) clean() {
+func (clock *Clock) clean() {
 	clock.clockMu.Lock()
 	clock.timeLimit = 0
 	clock.clockCond.Broadcast()
@@ -459,16 +464,16 @@ func (clock *Clock) createClock() {
 	clock.kill      = false
 	go func () {
 		for {
-			time.Sleep(time.Duration(50) * time.Millisecond)
+			time.Sleep(time.Duration(CLOCK_UNIT) * time.Millisecond)
+			clock.clockMu.Lock()
 			if clock.kill {
 				break
 			}
-			clock.clockMu.Lock()
-			clock.clockTime += 50
-			clock.clockMu.Unlock()
+			clock.clockTime += CLOCK_UNIT
 			if (clock.clockTime >= clock.timeLimit) {
 				clock.clockCond.Broadcast()
 			}
+			clock.clockMu.Unlock()
 		}
 	} ()
 }
@@ -517,6 +522,7 @@ func (rf *Raft) toLeader() {
 	rf.serverType = leader
 	rf.votedFor = -1
 	go rf.startHeartBeat()
+	//fmt.Println("new leader ", rf.me, " ", rf.currentTerm)
 }
 
 // candidate, follower, leads all could be folloer
@@ -526,6 +532,7 @@ func (rf *Raft) toFollower(newTerm int) {
 	rf.currentTerm = newTerm
 	rf.serverType = follower
 	rf.votedFor = -1
+	//fmt.Println("new follower ", rf.me, " ", rf.currentTerm)
 }
 
 
