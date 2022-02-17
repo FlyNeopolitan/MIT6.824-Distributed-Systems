@@ -257,8 +257,10 @@ type AppendEntriesReply struct {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	rf.clock.reset() // reset timing for timeout
 	rf.mu.Lock()
+	if rf.currentTerm <= args.Term {
+		rf.clock.reset() // reset timing for timeout
+	}
 	reply.Term = rf.currentTerm
 	if rf.currentTerm < args.Term || rf.serverType == candidate {
 		rf.toFollower(args.Term)
@@ -350,21 +352,24 @@ func Make(peers []*labrpc.ClientEnd, me int,
 }
 
 func (rf *Raft) timeoutCheck() {
-	for {
-		if rf.killed() {
-			break
-		}
+	for !rf.killed() {
 		timeLimit := MaxInt
+		rf.mu.Lock()
 		switch rf.serverType {
 		case follower:
+			rf.mu.Unlock()
 			timeLimit = randInt(ElectionTimeoutLowerBound, ElectionTimeoutUpperBound)
 			rf.clock.wait(timeLimit)
+			rf.mu.Lock()
 			rf.serverType = candidate
+			rf.mu.Unlock()
 		case candidate:
+			rf.mu.Unlock()
 			go rf.startElection()
 			timeLimit = randInt(CandidateTimeoutLowerBound, CandidateTimeoutUpperBound)
 			rf.clock.wait(timeLimit)
 		case leader: // don't need to perform timeout check!
+		    rf.mu.Unlock()
 			rf.clock.wait(timeLimit)
 		}
 	}
@@ -385,7 +390,7 @@ func (rf *Raft) startElection() {
 	// (4)
 	counts := 0
 	for peer := range rf.peers {
-		args := RequestVoteArgs{CandiateId: rf.me, Term: rf.currentTerm}
+		args := RequestVoteArgs{CandiateId: rf.me, Term: oldTerm}
 		reply := RequestVoteReply{}
 		go func(server int) {
 			if (rf.sendRequestVote(server, &args, &reply)) {
@@ -415,7 +420,7 @@ func (rf *Raft) startHeartBeat() {
 		}
 		for peer := range rf.peers {
 			heartbeat := func(server int) {
-				args := AppendEntriesArgs{Term: rf.currentTerm}
+				args := AppendEntriesArgs{Term: oldTerm}
 				reply := AppendEntriesReply{}
 				if rf.sendAppendEntries(server, &args, &reply) {
 					rf.mu.Lock()
@@ -528,5 +533,6 @@ func (rf *Raft) toFollower(newTerm int) {
 	rf.serverType = follower
 	rf.votedFor = -1
 }
+
 
 
