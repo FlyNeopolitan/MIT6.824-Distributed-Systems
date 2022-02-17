@@ -258,14 +258,15 @@ type AppendEntriesReply struct {
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
-	if rf.currentTerm <= args.Term {
-		rf.clock.reset() // reset timing for timeout
-	}
+	defer rf.mu.Unlock()
 	reply.Term = rf.currentTerm
+	if rf.currentTerm > args.Term { // if current term > requester's term, reject request
+		return
+	}
+	rf.clock.reset() //reset timing for timeout
 	if rf.currentTerm < args.Term || rf.serverType == candidate {
 		rf.toFollower(args.Term)
 	}
-	rf.mu.Unlock()
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -355,21 +356,18 @@ func (rf *Raft) timeoutCheck() {
 	for !rf.killed() {
 		timeLimit := MaxInt
 		rf.mu.Lock()
-		switch rf.serverType {
+		serverType := rf.serverType
+		rf.mu.Unlock()
+		switch serverType {
 		case follower:
-			rf.mu.Unlock()
 			timeLimit = randInt(ElectionTimeoutLowerBound, ElectionTimeoutUpperBound)
 			rf.clock.wait(timeLimit)
-			rf.mu.Lock()
-			rf.serverType = candidate
-			rf.mu.Unlock()
+			rf.toCandidate()
 		case candidate:
-			rf.mu.Unlock()
 			go rf.startElection()
 			timeLimit = randInt(CandidateTimeoutLowerBound, CandidateTimeoutUpperBound)
 			rf.clock.wait(timeLimit)
 		case leader: // don't need to perform timeout check!
-		    rf.mu.Unlock()
 			rf.clock.wait(timeLimit)
 		}
 	}
@@ -521,7 +519,6 @@ func (rf *Raft) continueHeartBeat(oldTerm int) bool {
 func (rf *Raft) toLeader() {
 	rf.clock.clean()
 	rf.serverType = leader
-	rf.votedFor = -1
 	go rf.startHeartBeat()
 }
 
@@ -529,10 +526,17 @@ func (rf *Raft) toLeader() {
 func (rf *Raft) toFollower(newTerm int) {
 	/* to Follower */
 	rf.clock.clean()
+	if rf.currentTerm < newTerm {
+		rf.votedFor = -1
+	}
 	rf.currentTerm = newTerm
 	rf.serverType = follower
-	rf.votedFor = -1
 }
 
+func (rf *Raft) toCandidate() {
+	rf.mu.Lock()
+	rf.serverType = candidate
+	rf.mu.Unlock()
+}
 
 
