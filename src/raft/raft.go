@@ -412,10 +412,7 @@ func (rf *Raft) startHeartBeat() {
 	rf.mu.Lock()
 	oldTerm := rf.currentTerm
 	rf.mu.Unlock()
-	for {
-		if !rf.continueHeartBeat(oldTerm) {
-			break
-		}
+	for rf.continueHeartBeat(oldTerm) {
 		for peer := range rf.peers {
 			heartbeat := func(server int) {
 				args := AppendEntriesArgs{Term: oldTerm}
@@ -502,17 +499,17 @@ func randInt(min int, max int) (int) {
 }
 
 func (rf *Raft) continueElection(oldTerm int) bool{
-	return rf.serverType == candidate && oldTerm == rf.currentTerm && !rf.killed()
+	return rf.serverType == candidate && oldTerm == rf.currentTerm 
 }
 
 func (rf *Raft) hasMajorVotes(counts int) bool {
-	return counts >= 1 + int(math.Floor(float64(len(rf.peers)) / 2.0)) && !rf.killed()
+	return counts >= 1 + int(math.Floor(float64(len(rf.peers)) / 2.0))
 }
 
 func (rf *Raft) continueHeartBeat(oldTerm int) bool {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	return rf.serverType == leader && oldTerm == rf.currentTerm
+	return rf.serverType == leader && oldTerm == rf.currentTerm && !rf.killed()
 }
 
 // only candidate can become leader
