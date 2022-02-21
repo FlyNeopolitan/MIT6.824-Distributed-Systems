@@ -45,6 +45,10 @@ var (
 	CandidateTimeoutUpperBound = 1000 // ms
 	HeartBeatsRate = 150              // ms
 	Max = func (a, b int) int {return int(math.Max(float64(a), float64(b)))}
+	Min = func (a, b int) int {return int(math.Min(float64(a), float64(b)))}
+	containEntry = "containEntry"
+	conflictEntry = "conflictEntry"
+	missingEntry = "missingEntry"
 )
 
 
@@ -209,7 +213,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 // (2B)
 func (rf *Raft) upToDate(args *RequestVoteArgs) (bool) {
-	return rf.currentTerm <= args.Term
+	if rf.currentTerm > args.Term {
+		return false
+	}
+	receiverLogTerm := rf.logs[len(rf.logs) - 1].TermReceived
+	return args.LastLogTerm > receiverLogTerm ||
+		(args.LastLogTerm == receiverLogTerm && args.LastLogIndex >= len(rf.logs) - 1)
 }
 
 //
@@ -247,8 +256,11 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 }
 
 type AppendEntriesArgs struct {
-	Term int // leader’s term
-	
+	Term         int   // leader’s term
+	PrevLogIndex int   // index of log entry immediately preceding new ones
+	PrevLogTerm  int   // term of prevLogIndex entry
+	Entries      []Log // log entries to store
+	LeaderCommit int   // leader's commitIndex
 }
 
 type AppendEntriesReply struct {
@@ -260,13 +272,35 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	reply.Term = rf.currentTerm
-	if rf.currentTerm > args.Term { // if current term > requester's term, reject request
+	reply.Success = false
+	// Reply false if term < currentTerm
+	if rf.currentTerm > args.Term { 
 		return
 	}
+	// Maintain server's type
 	rf.clock.reset() //reset timing for timeout
 	if rf.currentTerm < args.Term || rf.serverType == candidate {
 		rf.toFollower(args.Term)
 	}
+	// Start Appending
+	if CheckEntry(rf.logs, args.PrevLogIndex, args.PrevLogTerm) != containEntry {
+		return
+	}
+	numExists := 0
+	loop:
+	for i, entry := range args.Entries {
+		index := args.PrevLogIndex + 1 + i
+		switch CheckEntry(rf.logs, index, entry.TermReceived) {
+		case conflictEntry:
+			rf.logs = rf.logs[:index] // delete the existing entry and all that follow it
+			break loop  
+		case containEntry:
+			numExists += 1 
+		}	
+	}
+	rf.logs = append(rf.logs, args.Entries[numExists:]...)
+	rf.updateCommitIndex(args.LeaderCommit)
+	reply.Success = true
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -415,7 +449,7 @@ func (rf *Raft) startHeartBeat() {
 	for rf.continueHeartBeat(oldTerm) {
 		for peer := range rf.peers {
 			heartbeat := func(server int) {
-				args := AppendEntriesArgs{Term: oldTerm}
+				args := AppendEntriesArgs{Term: oldTerm, PrevLogIndex: -1, Entries: make([]Log, 0)}
 				reply := AppendEntriesReply{}
 				if rf.sendAppendEntries(server, &args, &reply) {
 					rf.mu.Lock()
@@ -514,26 +548,65 @@ func (rf *Raft) continueHeartBeat(oldTerm int) bool {
 
 // only candidate can become leader
 func (rf *Raft) toLeader() {
-	rf.clock.clean()
 	rf.serverType = leader
+	rf.clock.clean()
 	go rf.startHeartBeat()
 }
 
-// candidate, follower, leads all could be folloer
+// candidate, follower, leads all could be follower
 func (rf *Raft) toFollower(newTerm int) {
 	/* to Follower */
-	rf.clock.clean()
 	if rf.currentTerm < newTerm {
 		rf.votedFor = -1
 	}
 	rf.currentTerm = newTerm
 	rf.serverType = follower
+	rf.clock.clean()
 }
 
 func (rf *Raft) toCandidate() {
 	rf.mu.Lock()
 	rf.serverType = candidate
 	rf.mu.Unlock()
+}
+
+func (rf *Raft) updateCommitIndex(leaderCommit int) {
+	// If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
+	if leaderCommit > rf.commitIndex {
+		rf.commitIndex = Min(leaderCommit, len(rf.logs) - 1)
+	}
+	rf.applyCheck()
+}
+
+//If commitIndex > lastApplied: increment lastApplied, apply log[lastApplied] to state machine
+func (rf *Raft) applyCheck() {
+	for rf.lastApplied < rf.commitIndex {
+		rf.lastApplied += 1
+		rf.applyCommand(true, rf.logs[rf.lastApplied].Command, rf.lastApplied)
+	}
+}
+
+func (rf *Raft) applyCommand(valid bool, command interface{}, index int) {
+	// apply command
+	applyMsg := ApplyMsg{CommandValid: valid, Command: command, CommandIndex: index}
+}
+
+// check status of entry(index, term) in logs:
+// containEntry, conflictEntry or missingEntry
+func CheckEntry(logs []Log, index int, term int) string {
+	if index < 0 {
+		return containEntry
+	}
+	length := len(logs)
+	if index >= length {
+		return missingEntry
+	}
+	switch logs[index].TermReceived {
+	case term:
+		return containEntry
+	default:
+		return conflictEntry
+	}
 }
 
 
