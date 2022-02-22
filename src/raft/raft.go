@@ -333,7 +333,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	index := len(rf.logs)
+	index := len(rf.logs) + 1
 	term := rf.currentTerm
 	isLeader := rf.serverType == leader
 
@@ -694,7 +694,7 @@ func (rf *Raft) applyCheck() {
 
 func (rf *Raft) applyCommand(valid bool, command interface{}, index int) {
 	// apply command
-	applyMsg := ApplyMsg{CommandValid: valid, Command: command, CommandIndex: index}
+	applyMsg := ApplyMsg{CommandValid: valid, Command: command, CommandIndex: index + 1}
 	rf.applyCh <- applyMsg
 }
 
