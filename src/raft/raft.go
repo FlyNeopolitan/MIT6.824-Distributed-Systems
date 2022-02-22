@@ -49,6 +49,7 @@ var (
 	Min = func (a, b int) int {return int(math.Min(float64(a), float64(b)))}
 	containEntry = "containEntry"
 	conflictEntry = "conflictEntry"
+	missingEntry = "missingEntry"
 )
 
 
@@ -366,7 +367,7 @@ func (rf *Raft) logReplication() {
 				}
 			}
 		}
-		rf.updateCommitLeader()
+		//rf.updateCommitLeader()
 	}
 }
 
@@ -528,6 +529,7 @@ func (rf *Raft) AppendEntriesFor(idx int, entries []Log, targetServer int, term 
 			case true:
 				rf.nextIndex[targetServer] = idx + len(entries)
 				rf.matchIndex[targetServer] = idx + len(entries) - 1
+				rf.updateCommitLeader()
 			case false:
 				rf.nextIndex[targetServer] = Max(0, rf.nextIndex[targetServer] - 1)
 			}
@@ -617,7 +619,7 @@ func (rf *Raft) continueHeartBeat(oldTerm int) bool {
 
 func (rf *Raft) needReplicate() bool {
 	for peer := range rf.peers {
-		if len(rf.logs) - 1 >= rf.nextIndex[peer] {
+		if peer != rf.me && len(rf.logs) - 1 >= rf.nextIndex[peer] {
 			return true
 		}
 	}
@@ -669,9 +671,9 @@ func (rf *Raft) updateCommitFollower(leaderCommit int) {
 // set commitIndex = N
 func (rf *Raft) updateCommitLeader() {
 	for N := rf.commitIndex + 1; N < len(rf.logs); N++ {
-		count := 0
+		count := 1
 		for peer := range rf.peers {
-			if rf.matchIndex[peer] >= N {
+			if peer != rf.me && rf.matchIndex[peer] >= N {
 				count += 1
 			}
 		}
@@ -704,7 +706,7 @@ func CheckEntry(logs []Log, index int, term int) string {
 	}
 	length := len(logs)
 	if index >= length {
-		return conflictEntry
+		return missingEntry
 	}
 	switch logs[index].TermReceived {
 	case term:
