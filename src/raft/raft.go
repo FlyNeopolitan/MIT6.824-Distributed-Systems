@@ -293,6 +293,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if CheckEntry(rf.logs, args.PrevLogIndex, args.PrevLogTerm) != containEntry {
 		return
 	}
+	reply.Success = true
 	numExists := 0
 	loop:
 	for i, entry := range args.Entries {
@@ -307,7 +308,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	rf.logs = append(rf.logs, args.Entries[numExists:]...)
 	rf.updateCommitFollower(args.LeaderCommit)
-	reply.Success = true
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -352,7 +352,9 @@ func (rf *Raft) logReplication() {
 	oldTerm := rf.currentTerm
 	rf.mu.Unlock()
 	for rf.continueHeartBeat(oldTerm) {
-		rf.waitReplicate()
+		if !rf.waitReplicate(oldTerm) {
+			break
+		}
 		for peer := range rf.peers {
 			if peer != rf.me {
 				rf.mu.Lock()
@@ -367,16 +369,19 @@ func (rf *Raft) logReplication() {
 				}
 			}
 		}
-		//rf.updateCommitLeader()
 	}
 }
 
-func (rf *Raft) waitReplicate() {
+func (rf *Raft) waitReplicate(oldTerm int) bool {
 	rf.mu.Lock()
-		for !rf.needReplicate() && !rf.killed() {
-			rf.cond.Wait()
+	defer rf.mu.Unlock()
+	for !rf.needReplicate() && !rf.killed() {
+		rf.cond.Wait()
+		if (rf.currentTerm != oldTerm || rf.serverType != leader) {
+			return false
 		}
-	rf.mu.Unlock()
+	}
+	return true
 }
 
 //
@@ -497,11 +502,14 @@ func (rf *Raft) startHeartBeat() {
 	rf.mu.Unlock()
 	for rf.continueHeartBeat(oldTerm) {
 		for peer := range rf.peers {
-			heartbeat := func(server int) {
-				rf.AppendEntriesFor(rf.nextIndex[peer], make([]Log, 0), server, oldTerm)
+			rf.mu.Lock()
+			idx := rf.nextIndex[peer]
+			rf.mu.Unlock()
+			heartbeat := func(server int, idx int) {
+				rf.AppendEntriesFor(idx, make([]Log, 0), server, oldTerm)
 			}
 			if peer != rf.me {
-				go heartbeat(peer)
+				go heartbeat(peer, idx)
 			}
 		}
 		time.Sleep(time.Duration(HeartBeatsRate) * time.Millisecond)
@@ -524,14 +532,14 @@ func (rf *Raft) AppendEntriesFor(idx int, entries []Log, targetServer int, term 
 		rf.mu.Lock()
 		if reply.Term > rf.currentTerm {
 			rf.toFollower(reply.Term)
-		} else {
+		} else if term == rf.currentTerm { // the data is not out-dated
 			switch reply.Success {
 			case true:
 				rf.nextIndex[targetServer] = idx + len(entries)
 				rf.matchIndex[targetServer] = idx + len(entries) - 1
 				rf.updateCommitLeader()
 			case false:
-				rf.nextIndex[targetServer] = Max(0, rf.nextIndex[targetServer] - 1)
+				rf.nextIndex[targetServer] -= 1
 			}
 		}
 		rf.mu.Unlock()
@@ -627,13 +635,15 @@ func (rf *Raft) needReplicate() bool {
 }
 
 // only candidate can become leader
+// nextIndex: initialized to leader last log index + 1
+// matchIndex: initialized to -1
 func (rf *Raft) toLeader() {
 	rf.serverType = leader
 	rf.clock.clean()
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.nextIndex = make([]int, len(rf.peers))
 	for i := 0; i < len(rf.peers); i++ {
-		rf.matchIndex[i], rf.nextIndex[i] = -1, Max(0, len(rf.logs) - 1)
+		rf.matchIndex[i], rf.nextIndex[i] = -1, len(rf.logs)
 	}
 	go rf.startHeartBeat()
 	go rf.logReplication()
