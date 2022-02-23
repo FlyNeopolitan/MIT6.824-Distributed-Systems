@@ -469,6 +469,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 func (rf *Raft) periodicApplyCheck() {
 	for !rf.killed() {
 		rf.mu.Lock()
+		if (rf.lastApplied >= rf.commitIndex) {
+			rf.cond.Wait()
+		}
 		rf.applyCheck()
 		rf.mu.Unlock()
 		time.Sleep(time.Duration(ApplyCheckRate) * time.Millisecond)
@@ -712,6 +715,7 @@ func (rf *Raft) updateCommitFollower(leaderCommit int, lastNewEntry int) {
 	// If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
 	if leaderCommit > rf.commitIndex {
 		rf.commitIndex = Min(leaderCommit, lastNewEntry)
+		rf.cond.Broadcast()
 	}
 }
 
@@ -728,6 +732,7 @@ func (rf *Raft) updateCommitLeader() {
 		}
 		if rf.hasMajorVotes(count) && rf.logs[N].TermReceived == rf.currentTerm {
 			rf.commitIndex = N
+			rf.cond.Broadcast()
 		}
 	}
 }
