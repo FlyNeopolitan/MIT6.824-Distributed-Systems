@@ -284,12 +284,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if rf.currentTerm > args.Term { 
 		return
 	}
-	/*
-	if (len(args.Entries) > 0) {
-		println("receiver starts processing with entries length: ", len(args.Entries))
-		rf.printInfo()
-	}
-	*/
 	// Maintain server's type
 	rf.clock.reset() //reset timing for timeout
 	if rf.currentTerm < args.Term || rf.serverType == candidate {
@@ -316,16 +310,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	logBefore, logAfter := rf.logs[:args.PrevLogIndex + 1 + numExists], rf.logs[args.PrevLogIndex + 1 + numExists:]
 	rf.logs = append(logBefore, args.Entries[numExists:]...)
 	rf.logs = append(rf.logs, logAfter...)
-	
-	
 	rf.updateCommitFollower(args.LeaderCommit, lastNewEntry)
-
-	/*
-	if (len(args.Entries) > 0) {
-		println("receiver has completed agreement")
-		rf.printInfo()
-	}
-	*/
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -373,7 +358,6 @@ func (rf *Raft) logReplication() {
 		if !rf.waitReplicate(oldTerm) {
 			break
 		}
-		//println("New log length!: ", len(rf.logs))
 		for peer := range rf.peers {
 			if peer != rf.me {
 				rf.mu.Lock()
@@ -381,10 +365,6 @@ func (rf *Raft) logReplication() {
 				entries := make([]Log, 0)
 				if nextIdx < len(rf.logs) {
 					entries = rf.logs[nextIdx:]
-					/*
-					println("start agreement with entries length: ", len(entries), " at index: ", nextIdx)
-					rf.printInfo()
-					*/
 				}
 				rf.mu.Unlock()
 				if lastLogIdx >= nextIdx {
@@ -577,10 +557,6 @@ func (rf *Raft) AppendEntriesFor(idx int, entries []Log, targetServer int, term 
 				rf.nextIndex[targetServer] = idx + len(entries)
 				rf.matchIndex[targetServer] = idx + len(entries) - 1
 				rf.updateCommitLeader()
-				/*
-				println("Get result of agreement!, and nextIdx for ", targetServer, " is ", rf.nextIndex[targetServer])
-				rf.printInfo()
-				*/
 			case false:
 				rf.nextIndex[targetServer] -= 1
 			}
