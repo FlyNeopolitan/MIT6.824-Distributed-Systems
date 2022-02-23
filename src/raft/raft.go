@@ -40,11 +40,11 @@ var (
 	follower  = "followers"
 	candidate = "candidate"
 	leader    = "leader"
-	ElectionTimeoutLowerBound = 600   // ms
+	ElectionTimeoutLowerBound = 500   // ms
 	ElectionTimeoutUpperBound = 1000  // ms
-	CandidateTimeoutLowerBound = 600  // ms
+	CandidateTimeoutLowerBound = 500  // ms
 	CandidateTimeoutUpperBound = 1000 // ms
-	HeartBeatsRate = 200              // ms
+	HeartBeatsRate = 150              // ms
 	ApplyCheckRate = 10               // ms
 	ReplicationCheckRate = 10         // ms
 	Max = func (a, b int) int {return int(math.Max(float64(a), float64(b)))}
@@ -206,6 +206,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	reply.VoteGranted = false
+	reply.Term = rf.currentTerm
 	if rf.currentTerm < args.Term {
 		rf.toFollower(args.Term)
 	}
@@ -214,7 +215,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.votedFor = args.CandiateId
 		rf.clock.reset() // restart your election timer when granting a vote to another peer.
 	}
-	reply.Term = rf.currentTerm
 	rf.mu.Unlock()
 }
 
@@ -304,6 +304,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			break loop  
 		case containEntry:
 			numExists += 1 
+		default:
+			break loop
 		}	
 	}
 	lastNewEntry := args.PrevLogIndex + len(args.Entries)
@@ -373,7 +375,6 @@ func (rf *Raft) logReplication() {
 			}
 		}
 		time.Sleep(time.Duration(ReplicationCheckRate) * time.Millisecond)
-
 	}
 }
 
@@ -699,7 +700,7 @@ func (rf *Raft) updateCommitFollower(leaderCommit int, lastNewEntry int) {
 // and log[N].term == currentTerm:
 // set commitIndex = N
 func (rf *Raft) updateCommitLeader() {
-	for N := rf.commitIndex + 1; N < len(rf.logs); N++ {
+	for N := len(rf.logs) - 1; N > rf.commitIndex; N-- {
 		count := 1
 		for peer := range rf.peers {
 			if peer != rf.me && rf.matchIndex[peer] >= N {
@@ -709,6 +710,7 @@ func (rf *Raft) updateCommitLeader() {
 		if rf.hasMajorVotes(count) && rf.logs[N].TermReceived == rf.currentTerm {
 			rf.commitIndex = N
 			rf.cond.Broadcast()
+			break
 		}
 	}
 }
