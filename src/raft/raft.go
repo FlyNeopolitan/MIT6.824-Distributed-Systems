@@ -45,6 +45,7 @@ var (
 	CandidateTimeoutLowerBound = 500  // ms
 	CandidateTimeoutUpperBound = 1000 // ms
 	HeartBeatsRate = 150              // ms
+	ApplyCheckRate = 150              // ms
 	Max = func (a, b int) int {return int(math.Max(float64(a), float64(b)))}
 	Min = func (a, b int) int {return int(math.Min(float64(a), float64(b)))}
 	containEntry = "containEntry"
@@ -433,11 +434,22 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastApplied, rf.commitIndex = -1, -1
 	rf.clock.createClock()
 	go rf.timeoutCheck()
+	go rf.periodicApplyCheck()
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 
 	return rf
+}
+
+func (rf *Raft) periodicApplyCheck() {
+	for !rf.killed() {
+		rf.mu.Lock()
+		rf.applyCheck()
+		rf.printInfo()
+		rf.mu.Unlock()
+		time.Sleep(time.Duration(ApplyCheckRate) * time.Millisecond)
+	}
 }
 
 func (rf *Raft) timeoutCheck() {
@@ -673,7 +685,7 @@ func (rf *Raft) updateCommitFollower(leaderCommit int) {
 	if leaderCommit > rf.commitIndex {
 		rf.commitIndex = Min(leaderCommit, len(rf.logs) - 1)
 	}
-	rf.applyCheck()
+	//rf.applyCheck()
 }
 
 // If there exists an N such that N > commitIndex, a majority of matchIndex[i] ≥ N, 
@@ -691,7 +703,7 @@ func (rf *Raft) updateCommitLeader() {
 			rf.commitIndex = N
 		}
 	}
-	rf.applyCheck()
+	//rf.applyCheck()
 }
 
 //If commitIndex > lastApplied: increment lastApplied, apply log[lastApplied] to state machine
@@ -724,6 +736,15 @@ func CheckEntry(logs []Log, index int, term int) string {
 	default:
 		return conflictEntry
 	}
+}
+
+func (rf *Raft) printInfo() {
+	println("I am ", rf.me, "status ", rf.serverType, " term: ", rf.currentTerm, " commitIdx: ", rf.commitIndex, "lastApplied: ", rf.lastApplied, "log length: ", len(rf.logs))
+	print("Logs: ")
+	for _, log := range rf.logs {
+		print(log.Command, " ")
+	}
+	print("\n")
 }
 
 
