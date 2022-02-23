@@ -351,44 +351,29 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	return index, term, isLeader
 }
 
-func (rf *Raft) logReplication() {
+func (rf *Raft) logReplication(oldTerm int) {
 	// start making agreements
-	rf.mu.Lock()
-	oldTerm := rf.currentTerm
-	rf.mu.Unlock()
+	for peer := range rf.peers {
+		if peer != rf.me {
+			go rf.logReplicationFor(peer, oldTerm)
+		}
+	}
+}
+
+func (rf *Raft) logReplicationFor(server int, oldTerm int) {
 	for rf.continueHeartBeat(oldTerm) {
-		if !rf.waitReplicate(oldTerm) {
-			break
+		rf.mu.Lock()
+		if len(rf.logs) - 1 < rf.nextIndex[server] {
+			rf.cond.Wait()
 		}
-		for peer := range rf.peers {
-			if peer != rf.me {
-				rf.mu.Lock()
-				lastLogIdx, nextIdx := len(rf.logs) - 1, rf.nextIndex[peer]
-				entries := make([]Log, 0)
-				if nextIdx < len(rf.logs) {
-					entries = rf.logs[nextIdx:]
-				}
-				rf.mu.Unlock()
-				if lastLogIdx >= nextIdx {
-					go rf.AppendEntriesFor(nextIdx, entries, peer, oldTerm)
-				}
-			}
-		}
+		nextIdx := rf.nextIndex[server]
+		entries := rf.logs[nextIdx:]
+		rf.mu.Unlock()
+		rf.AppendEntriesFor(nextIdx, entries, server, oldTerm)
 		time.Sleep(time.Duration(ReplicationCheckRate) * time.Millisecond)
 	}
 }
 
-func (rf *Raft) waitReplicate(oldTerm int) bool {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	for !rf.needReplicate() && !rf.killed() {
-		rf.cond.Wait()
-		if (rf.currentTerm != oldTerm || rf.serverType != leader) {
-			return false
-		}
-	}
-	return rf.currentTerm == oldTerm && rf.serverType == leader
-}
 
 //
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -516,10 +501,7 @@ func (rf *Raft) startElection() {
 	}
 }
 
-func (rf *Raft) startHeartBeat() {
-	rf.mu.Lock()
-	oldTerm := rf.currentTerm
-	rf.mu.Unlock()
+func (rf *Raft) startHeartBeat(oldTerm int) {
 	for rf.continueHeartBeat(oldTerm) {
 		for peer := range rf.peers {
 			rf.mu.Lock()
@@ -665,8 +647,9 @@ func (rf *Raft) toLeader() {
 	for i := 0; i < len(rf.peers); i++ {
 		rf.matchIndex[i], rf.nextIndex[i] = -1, len(rf.logs)
 	}
-	go rf.startHeartBeat()
-	go rf.logReplication()
+	oldTerm := rf.currentTerm
+	go rf.startHeartBeat(oldTerm)
+	go rf.logReplication(oldTerm)
 }
 
 // candidate, follower, leads all could be follower
