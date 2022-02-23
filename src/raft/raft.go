@@ -41,11 +41,11 @@ var (
 	candidate = "candidate"
 	leader    = "leader"
 	ElectionTimeoutLowerBound = 600   // ms
-	ElectionTimeoutUpperBound = 1000 // ms
+	ElectionTimeoutUpperBound = 1000  // ms
 	CandidateTimeoutLowerBound = 600  // ms
 	CandidateTimeoutUpperBound = 1000 // ms
-	HeartBeatsRate = 150              // ms
-	ApplyCheckRate = 10              // ms
+	HeartBeatsRate = 200              // ms
+	ApplyCheckRate = 10               // ms
 	Max = func (a, b int) int {return int(math.Max(float64(a), float64(b)))}
 	Min = func (a, b int) int {return int(math.Min(float64(a), float64(b)))}
 	containEntry = "containEntry"
@@ -208,9 +208,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if rf.currentTerm < args.Term {
 		rf.toFollower(args.Term)
 	}
-	if (rf.votedFor == -1 || rf.votedFor == args.CandiateId) && rf.upToDate(args) {
+	if (rf.votedFor == -1) && rf.upToDate(args) {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandiateId
+		rf.clock.reset() // restart your election timer when granting a vote to another peer.
 	}
 	reply.Term = rf.currentTerm
 	rf.mu.Unlock()
@@ -221,12 +222,9 @@ func (rf *Raft) upToDate(args *RequestVoteArgs) (bool) {
 	if rf.currentTerm > args.Term {
 		return false
 	}
-	receiverLogTerm := 0
-	if len(rf.logs) > 0 {
-		receiverLogTerm = rf.logs[len(rf.logs) - 1].TermReceived
-	}
+	receiverLogIdx, receiverLogTerm := rf.lastLog()
 	return args.LastLogTerm > receiverLogTerm ||
-		(args.LastLogTerm == receiverLogTerm && args.LastLogIndex >= len(rf.logs) - 1)
+		(args.LastLogTerm == receiverLogTerm && args.LastLogIndex >= receiverLogIdx)
 }
 
 //
@@ -307,8 +305,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			numExists += 1 
 		}	
 	}
-	rf.logs = append(rf.logs, args.Entries[numExists:]...)
-	rf.updateCommitFollower(args.LeaderCommit)
+	lastNewEntry := args.PrevLogIndex + len(args.Entries)
+	logBefore, logAfter := rf.logs[:args.PrevLogIndex + 1 + numExists], rf.logs[args.PrevLogIndex + 1 + numExists:]
+	rf.logs = append(logBefore, args.Entries[numExists:]...)
+	rf.logs = append(rf.logs, logAfter...)
+	
+	if (len(args.Entries) > 0) {
+		rf.printInfo()
+	}
+	
+	rf.updateCommitFollower(args.LeaderCommit, lastNewEntry)
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -363,6 +369,7 @@ func (rf *Raft) logReplication() {
 				entries := make([]Log, 0)
 				if nextIdx < len(rf.logs) {
 					entries = rf.logs[nextIdx:]
+					rf.printInfo()
 				}
 				rf.mu.Unlock()
 				if lastLogIdx >= nextIdx {
@@ -482,15 +489,16 @@ func (rf *Raft) startElection() {
 	rf.currentTerm += 1
 	oldTerm := rf.currentTerm
 	rf.votedFor = rf.me
+	lastLogIdx, lastLogTerm := rf.lastLog()
 	rf.mu.Unlock()
 	rf.clock.reset()
 	// (4)
-	counts := 0
+	counts := 1
 	for peer := range rf.peers {
-		args := RequestVoteArgs{CandiateId: rf.me, Term: oldTerm}
+		args := RequestVoteArgs{CandiateId: rf.me, Term: oldTerm, LastLogIndex: lastLogIdx, LastLogTerm: lastLogTerm}
 		reply := RequestVoteReply{}
 		go func(server int) {
-			if (rf.sendRequestVote(server, &args, &reply)) {
+			if (server != rf.me && rf.sendRequestVote(server, &args, &reply)) {
 				rf.mu.Lock()
 				if (reply.Term > rf.currentTerm) { // convert to follower
 					rf.toFollower(reply.Term)
@@ -679,10 +687,10 @@ func (rf *Raft) toCandidate() {
 	rf.mu.Unlock()
 }
 
-func (rf *Raft) updateCommitFollower(leaderCommit int) {
+func (rf *Raft) updateCommitFollower(leaderCommit int, lastNewEntry int) {
 	// If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
 	if leaderCommit > rf.commitIndex {
-		rf.commitIndex = Min(leaderCommit, len(rf.logs) - 1)
+		rf.commitIndex = Min(leaderCommit, lastNewEntry)
 	}
 }
 
@@ -733,6 +741,15 @@ func CheckEntry(logs []Log, index int, term int) string {
 	default:
 		return conflictEntry
 	}
+}
+
+func (rf *Raft) lastLog() (int, int) {
+	lastLogIdx := len(rf.logs) - 1
+	lastLogTerm := 0
+	if lastLogIdx >= 0 {
+		lastLogTerm = rf.logs[lastLogIdx].TermReceived
+	}
+	return lastLogIdx, lastLogTerm
 }
 
 func (rf *Raft) printInfo() {
