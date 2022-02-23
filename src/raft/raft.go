@@ -35,7 +35,7 @@ import (
 // import "../labgob"
 
 var (
-	CLOCK_UNIT = 50 // ms
+	CLOCK_UNIT = 100 // ms
 	MaxInt = math.MaxInt32 
 	follower  = "followers"
 	candidate = "candidate"
