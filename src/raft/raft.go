@@ -40,12 +40,12 @@ var (
 	follower  = "followers"
 	candidate = "candidate"
 	leader    = "leader"
-	ElectionTimeoutLowerBound = 500   // ms
+	ElectionTimeoutLowerBound = 600   // ms
 	ElectionTimeoutUpperBound = 1000 // ms
-	CandidateTimeoutLowerBound = 500  // ms
+	CandidateTimeoutLowerBound = 600  // ms
 	CandidateTimeoutUpperBound = 1000 // ms
 	HeartBeatsRate = 150              // ms
-	ApplyCheckRate = 150              // ms
+	ApplyCheckRate = 10              // ms
 	Max = func (a, b int) int {return int(math.Max(float64(a), float64(b)))}
 	Min = func (a, b int) int {return int(math.Min(float64(a), float64(b)))}
 	containEntry = "containEntry"
@@ -382,7 +382,7 @@ func (rf *Raft) waitReplicate(oldTerm int) bool {
 			return false
 		}
 	}
-	return true
+	return rf.currentTerm == oldTerm && rf.serverType == leader
 }
 
 //
@@ -446,7 +446,6 @@ func (rf *Raft) periodicApplyCheck() {
 	for !rf.killed() {
 		rf.mu.Lock()
 		rf.applyCheck()
-		rf.printInfo()
 		rf.mu.Unlock()
 		time.Sleep(time.Duration(ApplyCheckRate) * time.Millisecond)
 	}
@@ -685,7 +684,6 @@ func (rf *Raft) updateCommitFollower(leaderCommit int) {
 	if leaderCommit > rf.commitIndex {
 		rf.commitIndex = Min(leaderCommit, len(rf.logs) - 1)
 	}
-	//rf.applyCheck()
 }
 
 // If there exists an N such that N > commitIndex, a majority of matchIndex[i] ≥ N, 
@@ -703,7 +701,6 @@ func (rf *Raft) updateCommitLeader() {
 			rf.commitIndex = N
 		}
 	}
-	//rf.applyCheck()
 }
 
 //If commitIndex > lastApplied: increment lastApplied, apply log[lastApplied] to state machine
@@ -740,8 +737,12 @@ func CheckEntry(logs []Log, index int, term int) string {
 
 func (rf *Raft) printInfo() {
 	println("I am ", rf.me, "status ", rf.serverType, " term: ", rf.currentTerm, " commitIdx: ", rf.commitIndex, "lastApplied: ", rf.lastApplied, "log length: ", len(rf.logs))
+	printLogs(rf.logs)
+}
+
+func printLogs(logs []Log) {
 	print("Logs: ")
-	for _, log := range rf.logs {
+	for _, log := range logs {
 		print(log.Command, " ")
 	}
 	print("\n")
