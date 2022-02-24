@@ -46,7 +46,7 @@ var (
 	CandidateTimeoutUpperBound = 1000 // ms
 	HeartBeatsRate = 150              // ms
 	ApplyCheckRate = 10               // ms
-	ReplicationCheckRate = 10         // ms
+	ReplicationCheckRate = 15         // ms
 	Max = func (a, b int) int {return int(math.Max(float64(a), float64(b)))}
 	Min = func (a, b int) int {return int(math.Min(float64(a), float64(b)))}
 	containEntry = "containEntry"
@@ -448,18 +448,19 @@ func (rf *Raft) timeoutCheck() {
 	for !rf.killed() {
 		timeLimit := MaxInt
 		rf.mu.Lock()
-		serverType := rf.serverType
-		rf.mu.Unlock()
-		switch serverType {
+		switch rf.serverType {
 		case follower:
+			rf.mu.Unlock()
 			timeLimit = randInt(ElectionTimeoutLowerBound, ElectionTimeoutUpperBound)
 			rf.clock.wait(timeLimit)
 			rf.toCandidate()
 		case candidate:
+			rf.mu.Unlock()
 			go rf.startElection()
 			timeLimit = randInt(CandidateTimeoutLowerBound, CandidateTimeoutUpperBound)
 			rf.clock.wait(timeLimit)
 		case leader: // don't need to perform timeout check!
+			rf.mu.Unlock()
 			rf.clock.wait(timeLimit)
 		}
 	}
@@ -627,14 +628,6 @@ func (rf *Raft) continueHeartBeat(oldTerm int) bool {
 	return rf.serverType == leader && oldTerm == rf.currentTerm && !rf.killed()
 }
 
-func (rf *Raft) needReplicate() bool {
-	for peer := range rf.peers {
-		if peer != rf.me && len(rf.logs) - 1 >= rf.nextIndex[peer] {
-			return true
-		}
-	}
-	return false
-}
 
 // only candidate can become leader
 // nextIndex: initialized to leader last log index + 1
