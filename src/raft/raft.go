@@ -35,16 +35,16 @@ import (
 // import "../labgob"
 
 var (
-	CLOCK_UNIT = 150 // ms
+	CLOCK_UNIT = 100 // ms
 	MaxInt = math.MaxInt32 
 	follower  = "followers"
 	candidate = "candidate"
 	leader    = "leader"
 	ElectionTimeoutLowerBound = 500   // ms
-	ElectionTimeoutUpperBound = 1000  // ms
+	ElectionTimeoutUpperBound = 2000  // ms
 	CandidateTimeoutLowerBound = 500  // ms
-	CandidateTimeoutUpperBound = 1000 // ms
-	HeartBeatsRate = 150              // ms
+	CandidateTimeoutUpperBound = 2000 // ms
+	HeartBeatsRate = 200              // ms
 	ApplyCheckRate = 10               // ms
 	ReplicationCheckRate = 10         // ms
 	Max = func (a, b int) int {return int(math.Max(float64(a), float64(b)))}
@@ -85,9 +85,10 @@ type Raft struct {
 
 	// Your data here (2A, 2B, 2C).
 	// logic control data
-	serverType   string     // type of server: follower, candidate or leader
-	clock        Clock      // Clock
-	cond         *sync.Cond  // conditional variables
+	serverType   	string       // type of server: follower, candidate or leader
+	clock        	Clock        // Clock
+	applyCond       *sync.Cond   // conditional variables for applying
+	replicationCond []*sync.Cond // conditional variables for replication
 
 	// Persistent state on all servers
 	currentTerm  int   // latest term server has seen 
@@ -118,7 +119,9 @@ type Clock struct {
 	clockMu      sync.Mutex // clock's mutex
 	clockCond    *sync.Cond // clock's conditional variables
 	timeLimit    int        // when time reaches time Limit, the clock would remind sleeping thread
+	ifClean      bool       // set to true to clean all waiting clocks
 	kill         bool       // set to true to kill the background clock
+
 }
  
 // return currentTerm and whether this server
@@ -215,7 +218,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.votedFor = args.CandiateId
 		DPrintf("[term %d]: Raft [%d] vote for Raft [%d]", rf.currentTerm, rf.me, rf.votedFor)
 		rf.clock.reset() // restart your election timer when granting a vote to another peer.
+	} else {
+		if (rf.votedFor != -1) {
+			DPrintf("[term %d]: Raft [%d] rejects votes for Raft [%d] since already voting ", rf.currentTerm, rf.me, args.CandiateId)
+		} else {
+			DPrintf("[term %d]: Raft [%d] rejects votes for Raft [%d] since more updated ", rf.currentTerm, rf.me, args.CandiateId)
+		}
 	}
+
 	reply.Term = rf.currentTerm
 	rf.mu.Unlock()
 }
@@ -348,7 +358,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	if isLeader {
 		rf.logs = append(rf.logs, Log{Command: command, TermReceived: rf.currentTerm})
-		rf.cond.Broadcast()
+		for peer := range rf.peers {
+			if peer != rf.me {
+				rf.replicationCond[peer].Broadcast()
+			}
+		}
 		DPrintf("[term %d]: Raft [%d] start consensus", rf.currentTerm, rf.me)
 	}
 
@@ -367,18 +381,16 @@ func (rf *Raft) logReplication(oldTerm int) {
 func (rf *Raft) logReplicationFor(server int, oldTerm int) {
 	for {
 		rf.mu.Lock()
-		for len(rf.logs) - 1 < rf.nextIndex[server] {
-			rf.cond.Wait()
+		for !rf.needsReplication(server) {
+			rf.replicationCond[server].Wait()
 		}
 		if rf.currentTerm != oldTerm || rf.serverType != leader || rf.killed() {
 			rf.mu.Unlock()
 			return
 		}
 		DPrintf("[term %d]:Raft [%d] [state %s] asks for replication for Raft[%d] with nextIdx[%d]", rf.currentTerm, rf.me, rf.serverType, server, rf.nextIndex[server])
-		nextIdx := rf.nextIndex[server]
-		entries := rf.logs[nextIdx:]
 		rf.mu.Unlock()
-		rf.AppendEntriesFor(nextIdx, entries, server, oldTerm)
+		rf.AppendEntriesFor(false, server, oldTerm)
 		
 		//time.Sleep(time.Duration(ReplicationCheckRate) * time.Millisecond)
 		/*
@@ -444,7 +456,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rand.Seed(time.Now().UnixNano())
 	rf.serverType, rf.currentTerm, rf.votedFor = follower, 1, -1
 	rf.applyCh = applyCh
-	rf.cond = sync.NewCond(&rf.mu)
+	rf.applyCond = sync.NewCond(&rf.mu)
+	rf.replicationCond = make([]*sync.Cond, len(peers))
+	for i := 0; i < len(peers); i++ {
+		rf.replicationCond[i] = sync.NewCond(&rf.mu)
+	}
+	rf.matchIndex = make([]int, len(rf.peers))
+	rf.nextIndex  = make([]int, len(rf.peers))
 	rf.logs = make([]Log, 0)
 	rf.lastApplied, rf.commitIndex = -1, -1
 	rf.clock.createClock()
@@ -453,7 +471,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
-
 	return rf
 }
 
@@ -461,7 +478,7 @@ func (rf *Raft) periodicApplyCheck() {
 	for !rf.killed() {
 		rf.mu.Lock()
 		for (rf.lastApplied >= rf.commitIndex) {
-			rf.cond.Wait()
+			rf.applyCond.Wait()
 			if rf.killed() {
 				rf.mu.Unlock()
 				return
@@ -511,7 +528,7 @@ func (rf *Raft) startElection() {
 	lastLogIdx, lastLogTerm := rf.lastLog()
 	DPrintf("[term %d]:Raft [%d][state %s] starts an election", oldTerm, rf.me, rf.serverType)
 	rf.mu.Unlock()
-	rf.clock.reset()
+	// rf.clock.reset()
 	// (4)
 	counts := 1
 	for peer := range rf.peers {
@@ -544,7 +561,7 @@ func (rf *Raft) startHeartBeat(oldTerm int) {
 				idx := len(rf.logs)
 				DPrintf("[term %d]:Raft [%d] [state %s] heartbeats Raft[%d] with idx[%d]", rf.currentTerm, rf.me, rf.serverType, server, idx)
 				rf.mu.Unlock()
-				rf.AppendEntriesFor(idx, make([]Log, 0), server, oldTerm)
+				rf.AppendEntriesFor(true, server, oldTerm)
 			}
 			if peer != rf.me {
 				go heartbeat(rf, peer)
@@ -556,8 +573,17 @@ func (rf *Raft) startHeartBeat(oldTerm int) {
 
 // perform append entries to target server
 // appending starting at idx and requires entries starting at idx
-func (rf *Raft) AppendEntriesFor(idx int, entries []Log, targetServer int, term int) {
+func (rf *Raft) AppendEntriesFor(isHeartBeat bool, targetServer int, term int) {
 	rf.mu.Lock()
+	if term != rf.currentTerm {
+		rf.mu.Unlock()
+		return
+	}
+	idx := rf.nextIndex[targetServer]
+	entries := rf.logs[idx:]
+	if isHeartBeat {
+		idx, entries = len(rf.logs), make([]Log, 0)
+	} 
 	prevLogIdx, prevLogTerm, commitIdx := idx - 1, 0, rf.commitIndex
 	if prevLogIdx >= 0 {
 		prevLogTerm =  rf.logs[prevLogIdx].TermReceived
@@ -581,6 +607,9 @@ func (rf *Raft) AppendEntriesFor(idx int, entries []Log, targetServer int, term 
 				DPrintf("[term %d]: Raft[%d] successfully append entries to Raft[%d] with new nextIdx[%d] matchIdx[%d]", rf.currentTerm, rf.me, targetServer, rf.nextIndex[targetServer], rf.matchIndex[targetServer])
 			case false:
 				rf.nextIndex[targetServer] = Min(rf.nextIndex[targetServer], idx - 1)
+				if rf.needsReplication(targetServer) {
+					rf.replicationCond[targetServer].Broadcast()
+				}
 				DPrintf("[term %d]: Raft[%d] fails append entries to Raft[%d] with newNextIdx[%d]", rf.currentTerm, rf.me, targetServer, rf.nextIndex[targetServer])
 			}
 		}
@@ -601,7 +630,7 @@ func (clock *Clock) reset() {
 // will clean ALL waiting threads on clock
 func (clock *Clock) clean() {
 	clock.clockMu.Lock()
-	clock.kill = true
+	clock.ifClean = true
 	clock.clockCond.Broadcast()
 	clock.clockMu.Unlock()
 }
@@ -611,6 +640,7 @@ func (clock *Clock) clean() {
 func (clock *Clock) createClock() {
 	clock.timeLimit = MaxInt
 	clock.kill      = false
+	clock.ifClean     = false
 	clock.clockCond = sync.NewCond(&clock.clockMu)
 	go func () {
 		for {
@@ -626,10 +656,10 @@ func (clock *Clock) createClock() {
 // sleep/wait until clock has reached time limit
 func (clock *Clock) wait(timeLimit int) {
 	clock.clockMu.Lock()
-	clock.kill = false
+	clock.ifClean = false
 	clock.clockTime = time.Now()
 	timeElapse := time.Since(clock.clockTime)
-	for timeElapse <  time.Duration(timeLimit) * time.Millisecond && !clock.kill {
+	for timeElapse <  time.Duration(timeLimit) * time.Millisecond && !clock.kill && !clock.ifClean {
 		clock.clockCond.Wait()
 		timeElapse = time.Since(clock.clockTime)
 	}
@@ -638,7 +668,10 @@ func (clock *Clock) wait(timeLimit int) {
 
 // kill all clock-related threads
 func (clock *Clock) killClock() {
-	clock.clean()
+	clock.clockMu.Lock()
+	clock.kill = true
+	clock.clockCond.Broadcast()
+	clock.clockMu.Unlock()
 }
 
 /******************************************** Tiny Helpers ***********************************/
@@ -668,15 +701,13 @@ func (rf *Raft) continueHeartBeat(oldTerm int) bool {
 func (rf *Raft) toLeader() {
 	DPrintf("[term %d]:Raft [%d] [state %s] becomes leader !", rf.currentTerm, rf.me, rf.serverType)
 	rf.serverType = leader
-	rf.clock.clean()
-	rf.matchIndex = make([]int, len(rf.peers))
-	rf.nextIndex = make([]int, len(rf.peers))
-	for i := 0; i < len(rf.peers); i++ {
-		rf.matchIndex[i], rf.nextIndex[i] = -1, len(rf.logs)
-	}
 	oldTerm := rf.currentTerm
 	go rf.startHeartBeat(oldTerm)
 	go rf.logReplication(oldTerm)
+	for i := 0; i < len(rf.peers); i++ {
+		rf.matchIndex[i], rf.nextIndex[i] = -1, len(rf.logs)
+	}
+	rf.clock.clean()
 }
 
 // candidate, follower, leads all could be follower
@@ -686,9 +717,13 @@ func (rf *Raft) toFollower(newTerm int) {
 		rf.votedFor = -1
 	}
 	rf.currentTerm = newTerm
+	switch rf.serverType {
+	case follower:
+		//rf.clock.reset()
+	default:
+		rf.clock.clean()
+	}
 	rf.serverType = follower
-	rf.clock.clean()
-	rf.cond.Broadcast()
 }
 
 // only follower or candidate can become candidate
@@ -705,7 +740,7 @@ func (rf *Raft) updateCommitFollower(leaderCommit int, lastNewEntry int) {
 		rf.commitIndex = Min(leaderCommit, lastNewEntry)
 		DPrintf("[term %d]:Raft [%d] [state %s] commitIndex is %d", rf.currentTerm, rf.me, rf.serverType, rf.commitIndex)
 		if rf.commitIndex > originalCommit {
-			rf.cond.Broadcast()
+			rf.applyCond.Broadcast()
 		}
 	}
 }
@@ -724,25 +759,9 @@ func (rf *Raft) updateCommitLeader() {
 		if rf.hasMajorVotes(count) && rf.logs[N].TermReceived == rf.currentTerm {
 			rf.commitIndex = N
 			DPrintf("[term %d]:Raft [%d] [state %s] commit log entry %d successfully", rf.currentTerm, rf.me, rf.serverType, N)
-			rf.cond.Broadcast()
+			rf.applyCond.Broadcast()
 			break
 		}
-	}
-}
-
-//If commitIndex > lastApplied: increment lastApplied, apply log[lastApplied] to state machine
-func (rf *Raft) applyCheck() {
-	for {
-		rf.mu.Lock()
-		if (rf.lastApplied >= rf.commitIndex) {
-			rf.mu.Unlock()
-			return
-		}
-		rf.lastApplied += 1
-		command, lastApplied := rf.logs[rf.lastApplied].Command, rf.lastApplied
-		DPrintf("[term %d]:Raft [%d] [state %s] apply log entry %d to the service successfully", rf.currentTerm, rf.me, rf.serverType, rf.lastApplied)
-		rf.mu.Unlock()
-		rf.applyCommand(true, command, lastApplied)
 	}
 }
 
@@ -780,6 +799,10 @@ func (rf *Raft) lastLog() (int, int) {
 		lastLogTerm = rf.logs[lastLogIdx].TermReceived
 	}
 	return lastLogIdx, lastLogTerm
+}
+
+func (rf *Raft) needsReplication(server int) bool {
+	return len(rf.logs) - 1 >= rf.nextIndex[server]
 }
 
 func (rf *Raft) printInfo() {
