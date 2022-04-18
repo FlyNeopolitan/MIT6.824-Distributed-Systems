@@ -35,7 +35,7 @@ import (
 // import "../labgob"
 
 var (
-	CLOCK_UNIT = 100 // ms
+	CLOCK_UNIT = 300 // ms
 	MaxInt = math.MaxInt32 
 	follower  = "followers"
 	candidate = "candidate"
@@ -46,7 +46,7 @@ var (
 	CandidateTimeoutUpperBound = 1000 // ms
 	HeartBeatsRate = 150              // ms
 	ApplyCheckRate = 10               // ms
-	ReplicationCheckRate = 15         // ms
+	ReplicationCheckRate = 10         // ms
 	Max = func (a, b int) int {return int(math.Max(float64(a), float64(b)))}
 	Min = func (a, b int) int {return int(math.Min(float64(a), float64(b)))}
 	containEntry = "containEntry"
@@ -206,7 +206,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	reply.VoteGranted = false
-	reply.Term = rf.currentTerm
 	if rf.currentTerm < args.Term {
 		rf.toFollower(args.Term)
 	}
@@ -215,6 +214,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.votedFor = args.CandiateId
 		rf.clock.reset() // restart your election timer when granting a vote to another peer.
 	}
+	reply.Term = rf.currentTerm
 	rf.mu.Unlock()
 }
 
@@ -288,6 +288,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.clock.reset() //reset timing for timeout
 	if rf.currentTerm < args.Term || rf.serverType == candidate {
 		rf.toFollower(args.Term)
+		reply.Term = rf.currentTerm
 	}
 	// Start Appending
 	if CheckEntry(rf.logs, args.PrevLogIndex, args.PrevLogTerm) != containEntry {
@@ -497,14 +498,15 @@ func (rf *Raft) startElection() {
 		go func(server int) {
 			if (server != rf.me && rf.sendRequestVote(server, &args, &reply)) {
 				rf.mu.Lock()
+				/*
 				if oldTerm != rf.currentTerm {
 					rf.mu.Unlock()
 					return
-				}
+				}*/
 				if (reply.Term > rf.currentTerm) { // convert to follower
 					rf.toFollower(reply.Term)
 				}
-				if reply.VoteGranted { // check if we have the major votes and convert to leader
+				if reply.VoteGranted && reply.Term == rf.currentTerm { // check if we have the major votes and convert to leader
 					counts += 1
 					if rf.continueElection(oldTerm) && rf.hasMajorVotes(counts) {
 						rf.toLeader()
@@ -549,7 +551,7 @@ func (rf *Raft) AppendEntriesFor(idx int, entries []Log, targetServer int, term 
 		rf.mu.Lock()
 		if reply.Term > rf.currentTerm {
 			rf.toFollower(reply.Term)
-		} else if term == rf.currentTerm { // the data is not out-dated
+		} else if term == rf.currentTerm && reply.Term == rf.currentTerm { // the data is not out-dated
 			switch reply.Success {
 			case true:
 				rf.nextIndex[targetServer] = idx + len(entries)
@@ -680,9 +682,12 @@ func (rf *Raft) toCandidate() {
 
 func (rf *Raft) updateCommitFollower(leaderCommit int, lastNewEntry int) {
 	// If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
+	originalCommit := rf.commitIndex
 	if leaderCommit > rf.commitIndex {
 		rf.commitIndex = Min(leaderCommit, lastNewEntry)
-		rf.cond.Broadcast()
+		if rf.commitIndex > originalCommit {
+			rf.cond.Broadcast()
+		}
 	}
 }
 
@@ -707,9 +712,16 @@ func (rf *Raft) updateCommitLeader() {
 
 //If commitIndex > lastApplied: increment lastApplied, apply log[lastApplied] to state machine
 func (rf *Raft) applyCheck() {
-	for rf.lastApplied < rf.commitIndex {
+	for {
+		rf.mu.Lock()
+		if (rf.lastApplied >= rf.commitIndex) {
+			rf.mu.Unlock()
+			return
+		}
 		rf.lastApplied += 1
-		rf.applyCommand(true, rf.logs[rf.lastApplied].Command, rf.lastApplied)
+		command, lastApplied := rf.logs[rf.lastApplied].Command, rf.lastApplied
+		rf.mu.Unlock()
+		rf.applyCommand(true, command, lastApplied)
 	}
 }
 
