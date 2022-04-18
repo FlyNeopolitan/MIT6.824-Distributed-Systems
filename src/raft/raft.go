@@ -35,15 +35,15 @@ import (
 // import "../labgob"
 
 var (
-	CLOCK_UNIT = 300 // ms
+	CLOCK_UNIT = 150 // ms
 	MaxInt = math.MaxInt32 
 	follower  = "followers"
 	candidate = "candidate"
 	leader    = "leader"
-	ElectionTimeoutLowerBound = 600   // ms
-	ElectionTimeoutUpperBound = 1200  // ms
-	CandidateTimeoutLowerBound = 600  // ms
-	CandidateTimeoutUpperBound = 1200 // ms
+	ElectionTimeoutLowerBound = 500   // ms
+	ElectionTimeoutUpperBound = 1000  // ms
+	CandidateTimeoutLowerBound = 500  // ms
+	CandidateTimeoutUpperBound = 1000 // ms
 	HeartBeatsRate = 150              // ms
 	ApplyCheckRate = 10               // ms
 	ReplicationCheckRate = 10         // ms
@@ -114,7 +114,7 @@ type Log struct {
 }
 
 type Clock struct {
-	clockTime    int        // current time in clock (in ms)
+	clockTime    time.Time  // current time in clock (in ms)
 	clockMu      sync.Mutex // clock's mutex
 	clockCond    *sync.Cond // clock's conditional variables
 	timeLimit    int        // when time reaches time Limit, the clock would remind sleeping thread
@@ -324,7 +324,6 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	return ok
 }
 
-
 //
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -521,11 +520,6 @@ func (rf *Raft) startElection() {
 		go func(server int) {
 			if (server != rf.me && rf.sendRequestVote(server, &args, &reply)) {
 				rf.mu.Lock()
-				/*
-				if oldTerm != rf.currentTerm {
-					rf.mu.Unlock()
-					return
-				}*/
 				if (reply.Term > rf.currentTerm) { // convert to follower
 					rf.toFollower(reply.Term)
 				}
@@ -602,14 +596,14 @@ func (rf *Raft) AppendEntriesFor(idx int, entries []Log, targetServer int, term 
 // will NOT clean ANY waiting threads on clock
 func (clock *Clock) reset() {
 	clock.clockMu.Lock()
-	clock.clockTime = 0
+	clock.clockTime = time.Now()
 	clock.clockMu.Unlock()
 }
 
 // will clean ALL waiting threads on clock
 func (clock *Clock) clean() {
 	clock.clockMu.Lock()
-	clock.timeLimit = 0
+	clock.kill = true
 	clock.clockCond.Broadcast()
 	clock.clockMu.Unlock()
 }
@@ -617,22 +611,16 @@ func (clock *Clock) clean() {
 // initialize the clock
 // create a background clock that will try to wake up any waiting threads on clock once time has reached upper liits
 func (clock *Clock) createClock() {
-	clock.clockTime = 0
-	clock.clockCond = sync.NewCond(&clock.clockMu)
 	clock.timeLimit = MaxInt
 	clock.kill      = false
+	clock.clockCond = sync.NewCond(&clock.clockMu)
 	go func () {
 		for {
+			clock.clockCond.Broadcast()
 			time.Sleep(time.Duration(CLOCK_UNIT) * time.Millisecond)
-			clock.clockMu.Lock()
 			if clock.kill {
 				break
 			}
-			clock.clockTime += CLOCK_UNIT
-			if (clock.clockTime >= clock.timeLimit) {
-				clock.clockCond.Broadcast()
-			}
-			clock.clockMu.Unlock()
 		}
 	} ()
 }
@@ -640,18 +628,18 @@ func (clock *Clock) createClock() {
 // sleep/wait until clock has reached time limit
 func (clock *Clock) wait(timeLimit int) {
 	clock.clockMu.Lock()
-	clock.clockTime, clock.timeLimit = 0, timeLimit
-	for clock.clockTime < clock.timeLimit {
+	clock.kill = false
+	clock.clockTime = time.Now()
+	timeElapse := time.Since(clock.clockTime)
+	for timeElapse <  time.Duration(timeLimit) * time.Millisecond && !clock.kill {
 		clock.clockCond.Wait()
+		timeElapse = time.Since(clock.clockTime)
 	}
 	clock.clockMu.Unlock()
 }
 
 // kill all clock-related threads
 func (clock *Clock) killClock() {
-	clock.clockMu.Lock()
-	clock.kill = true
-	clock.clockMu.Unlock()
 	clock.clean()
 }
 
@@ -764,6 +752,9 @@ func (rf *Raft) applyCommand(valid bool, command interface{}, index int) {
 	// apply command
 	applyMsg := ApplyMsg{CommandValid: valid, Command: command, CommandIndex: index + 1}
 	rf.applyCh <- applyMsg
+	rf.mu.Lock()
+	DPrintf("[term %d]:Raft [%d] [state %s] apply log entry %d to the service successfully", rf.currentTerm, rf.me, rf.serverType, rf.lastApplied)
+	rf.mu.Unlock()
 }
 
 // check status of entry(index, term) in logs:
