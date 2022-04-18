@@ -87,7 +87,7 @@ type Raft struct {
 	// logic control data
 	serverType   string     // type of server: follower, candidate or leader
 	clock        Clock      // Clock
-	cond         sync.Cond  // conditional variables
+	cond         *sync.Cond  // conditional variables
 
 	// Persistent state on all servers
 	currentTerm  int   // latest term server has seen 
@@ -419,7 +419,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rand.Seed(time.Now().UnixNano())
 	rf.serverType, rf.currentTerm, rf.votedFor = follower, 1, -1
 	rf.applyCh = applyCh
-	rf.cond = *sync.NewCond(&rf.mu)
+	rf.cond = sync.NewCond(&rf.mu)
 	rf.logs = make([]Log, 0)
 	rf.lastApplied, rf.commitIndex = -1, -1
 	rf.clock.createClock()
@@ -435,12 +435,18 @@ func Make(peers []*labrpc.ClientEnd, me int,
 func (rf *Raft) periodicApplyCheck() {
 	for !rf.killed() {
 		rf.mu.Lock()
-		if (rf.lastApplied >= rf.commitIndex) {
+		for (rf.lastApplied >= rf.commitIndex) {
 			rf.cond.Wait()
+			if rf.killed() {
+				rf.mu.Unlock()
+				return
+			}
 		}
-		rf.applyCheck()
+		rf.lastApplied += 1
+		command, lastApplied := rf.logs[rf.lastApplied].Command, rf.lastApplied
 		rf.mu.Unlock()
-		time.Sleep(time.Duration(ApplyCheckRate) * time.Millisecond)
+		rf.applyCommand(true, command, lastApplied)
+		//time.Sleep(time.Duration(ApplyCheckRate) * time.Millisecond)
 	}
 }
 
@@ -487,6 +493,10 @@ func (rf *Raft) startElection() {
 		go func(server int) {
 			if (server != rf.me && rf.sendRequestVote(server, &args, &reply)) {
 				rf.mu.Lock()
+				if oldTerm != rf.currentTerm {
+					rf.mu.Unlock()
+					return
+				}
 				if (reply.Term > rf.currentTerm) { // convert to follower
 					rf.toFollower(reply.Term)
 				}
@@ -744,5 +754,6 @@ func printLogs(logs []Log) {
 	}
 	print("\n")
 }
+
 
 
