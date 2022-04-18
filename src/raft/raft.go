@@ -40,10 +40,10 @@ var (
 	follower  = "followers"
 	candidate = "candidate"
 	leader    = "leader"
-	ElectionTimeoutLowerBound = 500   // ms
-	ElectionTimeoutUpperBound = 1000  // ms
-	CandidateTimeoutLowerBound = 500  // ms
-	CandidateTimeoutUpperBound = 1000 // ms
+	ElectionTimeoutLowerBound = 700   // ms
+	ElectionTimeoutUpperBound = 1500  // ms
+	CandidateTimeoutLowerBound = 700  // ms
+	CandidateTimeoutUpperBound = 1500 // ms
 	HeartBeatsRate = 150              // ms
 	ApplyCheckRate = 10               // ms
 	ReplicationCheckRate = 10         // ms
@@ -367,15 +367,15 @@ func (rf *Raft) logReplication(oldTerm int) {
 
 func (rf *Raft) logReplicationFor(server int, oldTerm int) {
 	for {
-		
 		rf.mu.Lock()
 		for len(rf.logs) - 1 < rf.nextIndex[server] {
 			rf.cond.Wait()
-			if rf.currentTerm != oldTerm || rf.serverType != leader || rf.killed() {
-				rf.mu.Unlock()
-				return
-			}
 		}
+		if rf.currentTerm != oldTerm || rf.serverType != leader || rf.killed() {
+			rf.mu.Unlock()
+			return
+		}
+		DPrintf("[term %d]:Raft [%d] [state %s] asks for replication for Raft[%d]", rf.currentTerm, rf.me, rf.serverType, server)
 		nextIdx := rf.nextIndex[server]
 		entries := rf.logs[nextIdx:]
 		rf.mu.Unlock()
@@ -510,9 +510,9 @@ func (rf *Raft) startElection() {
 	oldTerm := rf.currentTerm
 	rf.votedFor = rf.me
 	lastLogIdx, lastLogTerm := rf.lastLog()
+	DPrintf("[term %d]:Raft [%d][state %s] starts an election", oldTerm, rf.me, rf.serverType)
 	rf.mu.Unlock()
 	rf.clock.reset()
-	DPrintf("[term %d]:Raft [%d][state %s] starts an election", oldTerm, rf.me, rf.serverType)
 	// (4)
 	counts := 1
 	for peer := range rf.peers {
@@ -549,6 +549,9 @@ func (rf *Raft) startHeartBeat(oldTerm int) {
 			idx := rf.nextIndex[peer]
 			rf.mu.Unlock()
 			heartbeat := func(server int, idx int) {
+				rf.mu.Lock()
+				DPrintf("[term %d]:Raft [%d] [state %s] heartbeats Raft[%d]", rf.currentTerm, rf.me, rf.serverType, server)
+				rf.mu.Unlock()
 				rf.AppendEntriesFor(idx, make([]Log, 0), server, oldTerm)
 			}
 			if peer != rf.me {
