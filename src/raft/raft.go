@@ -35,15 +35,15 @@ import (
 // import "../labgob"
 
 var (
-	CLOCK_UNIT = 150 // ms
+	CLOCK_UNIT = 300 // ms
 	MaxInt = math.MaxInt32 
 	follower  = "followers"
 	candidate = "candidate"
 	leader    = "leader"
-	ElectionTimeoutLowerBound = 700   // ms
-	ElectionTimeoutUpperBound = 1500  // ms
-	CandidateTimeoutLowerBound = 700  // ms
-	CandidateTimeoutUpperBound = 1500 // ms
+	ElectionTimeoutLowerBound = 600   // ms
+	ElectionTimeoutUpperBound = 1200  // ms
+	CandidateTimeoutLowerBound = 600  // ms
+	CandidateTimeoutUpperBound = 1200 // ms
 	HeartBeatsRate = 150              // ms
 	ApplyCheckRate = 10               // ms
 	ReplicationCheckRate = 10         // ms
