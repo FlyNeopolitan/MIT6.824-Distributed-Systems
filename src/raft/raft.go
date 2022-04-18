@@ -280,7 +280,7 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	DPrintf("[term %d]: Raft[%d] [state %s] receive AppendEntries from Term[%d]", rf.currentTerm, rf.me, rf.serverType, args.Term)
+	DPrintf("[term %d]: Raft[%d] [state %s] receive AppendEntries from Term[%d] with prevLogIdx[%d] EntriesLength[%d]", rf.currentTerm, rf.me, rf.serverType, args.Term, args.PrevLogIndex, len(args.Entries))
 	reply.Term = rf.currentTerm
 	reply.Success = false
 	// Reply false if term < currentTerm
@@ -374,7 +374,7 @@ func (rf *Raft) logReplicationFor(server int, oldTerm int) {
 			rf.mu.Unlock()
 			return
 		}
-		DPrintf("[term %d]:Raft [%d] [state %s] asks for replication for Raft[%d]", rf.currentTerm, rf.me, rf.serverType, server)
+		DPrintf("[term %d]:Raft [%d] [state %s] asks for replication for Raft[%d] with nextIdx[%d]", rf.currentTerm, rf.me, rf.serverType, server, rf.nextIndex[server])
 		nextIdx := rf.nextIndex[server]
 		entries := rf.logs[nextIdx:]
 		rf.mu.Unlock()
@@ -539,17 +539,15 @@ func (rf *Raft) startElection() {
 func (rf *Raft) startHeartBeat(oldTerm int) {
 	for rf.continueHeartBeat(oldTerm) {
 		for peer := range rf.peers {
-			rf.mu.Lock()
-			idx := rf.nextIndex[peer]
-			rf.mu.Unlock()
-			heartbeat := func(server int, idx int) {
+			heartbeat := func (rf *Raft, server int) {
 				rf.mu.Lock()
-				DPrintf("[term %d]:Raft [%d] [state %s] heartbeats Raft[%d]", rf.currentTerm, rf.me, rf.serverType, server)
+				idx := len(rf.logs)
+				DPrintf("[term %d]:Raft [%d] [state %s] heartbeats Raft[%d] with idx[%d]", rf.currentTerm, rf.me, rf.serverType, server, idx)
 				rf.mu.Unlock()
 				rf.AppendEntriesFor(idx, make([]Log, 0), server, oldTerm)
 			}
 			if peer != rf.me {
-				go heartbeat(peer, idx)
+				go heartbeat(rf, peer)
 			}
 		}
 		time.Sleep(time.Duration(HeartBeatsRate) * time.Millisecond)
@@ -580,10 +578,10 @@ func (rf *Raft) AppendEntriesFor(idx int, entries []Log, targetServer int, term 
 				rf.nextIndex[targetServer] = idx + len(entries)
 				rf.matchIndex[targetServer] = idx + len(entries) - 1
 				rf.updateCommitLeader()
-				DPrintf("[term %d]: Raft[%d] successfully append entries to Raft[%d]", rf.currentTerm, rf.me, targetServer)
+				DPrintf("[term %d]: Raft[%d] successfully append entries to Raft[%d] with new nextIdx[%d] matchIdx[%d]", rf.currentTerm, rf.me, targetServer, rf.nextIndex[targetServer], rf.matchIndex[targetServer])
 			case false:
-				rf.nextIndex[targetServer] -= 1
-				DPrintf("[term %d]: Raft[%d] fails append entries to Raft[%d]", rf.currentTerm, rf.me, targetServer)
+				rf.nextIndex[targetServer] = Min(rf.nextIndex[targetServer], idx - 1)
+				DPrintf("[term %d]: Raft[%d] fails append entries to Raft[%d] with newNextIdx[%d]", rf.currentTerm, rf.me, targetServer, rf.nextIndex[targetServer])
 			}
 		}
 		rf.mu.Unlock()
