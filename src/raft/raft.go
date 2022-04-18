@@ -363,14 +363,18 @@ func (rf *Raft) logReplication(oldTerm int) {
 func (rf *Raft) logReplicationFor(server int, oldTerm int) {
 	for rf.continueHeartBeat(oldTerm) {
 		rf.mu.Lock()
-		if len(rf.logs) - 1 < rf.nextIndex[server] {
+		for len(rf.logs) - 1 < rf.nextIndex[server] {
 			rf.cond.Wait()
+			if rf.currentTerm != oldTerm || rf.serverType != leader || rf.killed() {
+				rf.mu.Unlock()
+				return
+			}
 		}
 		nextIdx := rf.nextIndex[server]
 		entries := rf.logs[nextIdx:]
 		rf.mu.Unlock()
 		rf.AppendEntriesFor(nextIdx, entries, server, oldTerm)
-		time.Sleep(time.Duration(ReplicationCheckRate) * time.Millisecond)
+		//time.Sleep(time.Duration(ReplicationCheckRate) * time.Millisecond)
 	}
 }
 
