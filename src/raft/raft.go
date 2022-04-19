@@ -421,24 +421,32 @@ func (rf *Raft) killed() bool {
 //
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
-	rf := &Raft{}
-	rf.peers = peers
-	rf.persister = persister
-	rf.me = me
-
+	rf := &Raft{
+		// logic control data
+		peers:		     peers,
+		persister:       persister,
+		me:              me,
+		applyCh:         applyCh,
+		// logic control data
+		serverType:      follower,
+		replicationCond: make([]*sync.Cond, len(peers)),
+		// Persistent state on all servers
+		currentTerm:     1,
+		votedFor: 	     -1,
+		logs:            make([]Log, 0),
+		// Volatile state on all servers
+		commitIndex:     -1,
+		lastApplied:     -1,
+		// Volatile state on all servers
+		nextIndex: 	     make([]int, len(peers)),
+		matchIndex:      make([]int, len(peers)),
+	}
 	// Your initialization code here (2A, 2B, 2C).
 	rand.Seed(time.Now().UnixNano())
-	rf.serverType, rf.currentTerm, rf.votedFor = follower, 1, -1
-	rf.applyCh = applyCh
 	rf.applyCond = sync.NewCond(&rf.mu)
-	rf.replicationCond = make([]*sync.Cond, len(peers))
 	for i := 0; i < len(peers); i++ {
 		rf.replicationCond[i] = sync.NewCond(&rf.mu)
 	}
-	rf.matchIndex = make([]int, len(rf.peers))
-	rf.nextIndex = make([]int, len(rf.peers))
-	rf.logs = make([]Log, 0)
-	rf.lastApplied, rf.commitIndex = -1, -1
 	rf.clock.createClock()
 	go rf.timeoutCheck()
 	go rf.periodicApplyCheck()
@@ -500,7 +508,6 @@ func (rf *Raft) startElection() {
 	lastLogIdx, lastLogTerm := rf.lastLog()
 	DPrintf("[term %d]:Raft [%d][state %s] starts an election", oldTerm, rf.me, rf.serverType)
 	rf.mu.Unlock()
-	// rf.clock.reset()
 	// (4)
 	counts := 1
 	for peer := range rf.peers {
@@ -546,28 +553,26 @@ func (rf *Raft) startHeartBeat(oldTerm int) {
 // perform append entries to target server
 // appending starting at idx and requires entries starting at idx
 func (rf *Raft) AppendEntriesFor(isHeartBeat bool, targetServer int, term int) {
+	// generate args
 	rf.mu.Lock()
-	if term != rf.currentTerm {
-		rf.mu.Unlock()
-		return
+	var idx int
+	switch isHeartBeat {
+	case true: 
+		idx = len(rf.logs)
+	case false:
+		idx = rf.nextIndex[targetServer]
 	}
-	idx := rf.nextIndex[targetServer]
 	entries := rf.logs[idx:]
-	if isHeartBeat {
-		idx, entries = len(rf.logs), make([]Log, 0)
-	}
-	prevLogIdx, prevLogTerm, commitIdx := idx-1, 0, rf.commitIndex
-	if prevLogIdx >= 0 {
-		prevLogTerm = rf.logs[prevLogIdx].TermReceived
-	}
+	prevLogIdx, prevLogTerm, commitIdx := idx - 1, rf.logTermAt(idx - 1), rf.commitIndex
 	DPrintf("[term %d]:Raft [%d] [state %s] sends appendentries RPC to server[%d]", rf.currentTerm, rf.me, rf.serverType, targetServer)
 	rf.mu.Unlock()
+	// send RPC, and handle responses
 	args := AppendEntriesArgs{Term: term, PrevLogIndex: prevLogIdx,
 		Entries: entries, PrevLogTerm: prevLogTerm, LeaderCommit: commitIdx}
 	reply := AppendEntriesReply{}
 	if rf.sendAppendEntries(targetServer, &args, &reply) {
 		rf.mu.Lock()
-		if reply.Term > rf.currentTerm {
+		if reply.Term > rf.currentTerm { // current Term is out-dated!
 			rf.toFollower(reply.Term)
 			DPrintf("[term %d]: Raft[%d] fails append entries to Raft[%d] due to term issue", rf.currentTerm, rf.me, targetServer)
 		} else if term == rf.currentTerm && reply.Term == rf.currentTerm { // the data is not out-dated
@@ -578,7 +583,7 @@ func (rf *Raft) AppendEntriesFor(isHeartBeat bool, targetServer int, term int) {
 				rf.updateCommitLeader()
 				DPrintf("[term %d]: Raft[%d] successfully append entries to Raft[%d] with new nextIdx[%d] matchIdx[%d]", rf.currentTerm, rf.me, targetServer, rf.nextIndex[targetServer], rf.matchIndex[targetServer])
 			case false:
-				rf.nextIndex[targetServer] = Min(rf.nextIndex[targetServer], idx-1)
+				rf.nextIndex[targetServer] = Min(rf.nextIndex[targetServer], idx - 1)
 				if rf.needsReplication(targetServer) {
 					rf.replicationCond[targetServer].Broadcast()
 				}
@@ -771,4 +776,12 @@ func (rf *Raft) lastLog() (int, int) {
 
 func (rf *Raft) needsReplication(server int) bool {
 	return len(rf.logs)-1 >= rf.nextIndex[server]
+}
+
+// return term at log[i] of rf, return 0 if i doesn't exist
+func (rf *Raft) logTermAt(i int) (int) {
+	if i >= 0 {
+		return rf.logs[i].TermReceived
+	}
+	return 0
 }
