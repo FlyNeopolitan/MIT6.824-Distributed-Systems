@@ -632,7 +632,7 @@ func (clock *Clock) killClock() {
 /******************************************** Tiny Helpers ***********************************/
 
 func randInt(min int, max int) int {
-	return rand.Intn(max-min) + min
+	return rand.Intn(max - min) + min
 }
 
 func (rf *Raft) continueElection(oldTerm int) bool {
@@ -640,7 +640,7 @@ func (rf *Raft) continueElection(oldTerm int) bool {
 }
 
 func (rf *Raft) hasMajorVotes(counts int) bool {
-	return counts >= 1+int(math.Floor(float64(len(rf.peers))/2.0))
+	return counts >= 1 + int(math.Floor(float64(len(rf.peers)) / 2.0))
 }
 
 func (rf *Raft) continueHeartBeat(oldTerm int) bool {
@@ -747,7 +747,7 @@ func (rf *Raft) lastLog() (int, int) {
 }
 
 func (rf *Raft) needsReplication(server int) bool {
-	return len(rf.logs)-1 >= rf.nextIndex[server]
+	return len(rf.logs) - 1 >= rf.nextIndex[server]
 }
 
 // return term at log[i] of rf, return 0 if i doesn't exist
