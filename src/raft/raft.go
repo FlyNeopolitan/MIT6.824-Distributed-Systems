@@ -41,9 +41,9 @@ var (
 	candidate                  = "candidate"
 	leader                     = "leader"
 	ElectionTimeoutLowerBound  = 500  // ms
-	ElectionTimeoutUpperBound  = 2000 // ms
+	ElectionTimeoutUpperBound  = 1500 // ms
 	CandidateTimeoutLowerBound = 500  // ms
-	CandidateTimeoutUpperBound = 2000 // ms
+	CandidateTimeoutUpperBound = 1500 // ms
 	HeartBeatsRate             = 200  // ms
 	Max                        = func(a, b int) int { return int(math.Max(float64(a), float64(b))) }
 	Min                        = func(a, b int) int { return int(math.Min(float64(a), float64(b))) }
@@ -199,7 +199,6 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
-	DPrintf("[term %d]: Raft[%d] receive requestVote from Raft[%d]", rf.currentTerm, rf.me, args.CandiateId)
 	reply.VoteGranted = false
 	if rf.currentTerm < args.Term {
 		rf.toFollower(args.Term)
@@ -207,16 +206,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if (rf.votedFor == -1) && rf.upToDate(args) {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandiateId
-		DPrintf("[term %d]: Raft [%d] vote for Raft [%d]", rf.currentTerm, rf.me, rf.votedFor)
 		rf.clock.reset() // restart your election timer when granting a vote to another peer.
-	} else {
-		if rf.votedFor != -1 {
-			DPrintf("[term %d]: Raft [%d] rejects votes for Raft [%d] since already voting ", rf.currentTerm, rf.me, args.CandiateId)
-		} else {
-			DPrintf("[term %d]: Raft [%d] rejects votes for Raft [%d] since more updated ", rf.currentTerm, rf.me, args.CandiateId)
-		}
-	}
-
+	} 
 	reply.Term = rf.currentTerm
 	rf.mu.Unlock()
 }
@@ -282,7 +273,6 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	DPrintf("[term %d]: Raft[%d] [state %s] receive AppendEntries from Term[%d] with prevLogIdx[%d] EntriesLength[%d]", rf.currentTerm, rf.me, rf.serverType, args.Term, args.PrevLogIndex, len(args.Entries))
 	reply.Term = rf.currentTerm
 	reply.Success = false
 	// Reply false if term < currentTerm
@@ -355,7 +345,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 				rf.replicationCond[peer].Broadcast()
 			}
 		}
-		DPrintf("[term %d]: Raft [%d] start consensus", rf.currentTerm, rf.me)
 	}
 
 	return index, term, isLeader
@@ -380,7 +369,6 @@ func (rf *Raft) logReplicationFor(server int, oldTerm int) {
 			rf.mu.Unlock()
 			return
 		}
-		DPrintf("[term %d]:Raft [%d] [state %s] asks for replication for Raft[%d] with nextIdx[%d]", rf.currentTerm, rf.me, rf.serverType, server, rf.nextIndex[server])
 		rf.mu.Unlock()
 		rf.AppendEntriesFor(false, server, oldTerm)
 	}
@@ -467,7 +455,6 @@ func (rf *Raft) periodicApplyCheck() {
 			}
 		}
 		rf.lastApplied += 1
-		DPrintf("[term %d]:Raft [%d] [state %s] apply log entry %d to the service", rf.currentTerm, rf.me, rf.serverType, rf.lastApplied)
 		command, lastApplied := rf.logs[rf.lastApplied].Command, rf.lastApplied
 		rf.mu.Unlock()
 		rf.applyCommand(true, command, lastApplied)
@@ -506,7 +493,6 @@ func (rf *Raft) startElection() {
 	oldTerm := rf.currentTerm
 	rf.votedFor = rf.me
 	lastLogIdx, lastLogTerm := rf.lastLog()
-	DPrintf("[term %d]:Raft [%d][state %s] starts an election", oldTerm, rf.me, rf.serverType)
 	rf.mu.Unlock()
 	// (4)
 	counts := 1
@@ -520,7 +506,6 @@ func (rf *Raft) startElection() {
 					rf.toFollower(reply.Term)
 				}
 				if reply.VoteGranted && reply.Term == rf.currentTerm { // check if we have the major votes and convert to leader
-					DPrintf("[term %d]:Raft [%d][state %s] gets votes from server[%d]", oldTerm, rf.me, rf.serverType, server)
 					counts += 1
 					if rf.continueElection(oldTerm) && rf.hasMajorVotes(counts) {
 						rf.toLeader()
@@ -536,10 +521,6 @@ func (rf *Raft) startHeartBeat(oldTerm int) {
 	for rf.continueHeartBeat(oldTerm) {
 		for peer := range rf.peers {
 			heartbeat := func(rf *Raft, server int) {
-				idx := len(rf.logs)
-				rf.mu.Lock()
-				DPrintf("[term %d]:Raft [%d] [state %s] heartbeats Raft[%d] with idx[%d]", rf.currentTerm, rf.me, rf.serverType, server, idx)
-				rf.mu.Unlock()
 				rf.AppendEntriesFor(true, server, oldTerm)
 			}
 			if peer != rf.me {
@@ -564,7 +545,6 @@ func (rf *Raft) AppendEntriesFor(isHeartBeat bool, targetServer int, term int) {
 	}
 	entries := rf.logs[idx:]
 	prevLogIdx, prevLogTerm, commitIdx := idx - 1, rf.logTermAt(idx - 1), rf.commitIndex
-	DPrintf("[term %d]:Raft [%d] [state %s] sends appendentries RPC to server[%d]", rf.currentTerm, rf.me, rf.serverType, targetServer)
 	rf.mu.Unlock()
 	// send RPC, and handle responses
 	args := AppendEntriesArgs{Term: term, PrevLogIndex: prevLogIdx,
@@ -574,20 +554,18 @@ func (rf *Raft) AppendEntriesFor(isHeartBeat bool, targetServer int, term int) {
 		rf.mu.Lock()
 		if reply.Term > rf.currentTerm { // current Term is out-dated!
 			rf.toFollower(reply.Term)
-			DPrintf("[term %d]: Raft[%d] fails append entries to Raft[%d] due to term issue", rf.currentTerm, rf.me, targetServer)
-		} else if term == rf.currentTerm && reply.Term == rf.currentTerm { // the data is not out-dated
+		} 
+		if term == rf.currentTerm && reply.Term == rf.currentTerm { // the data is not out-dated
 			switch reply.Success {
 			case true:
 				rf.nextIndex[targetServer] = idx + len(entries)
 				rf.matchIndex[targetServer] = idx + len(entries) - 1
 				rf.updateCommitLeader()
-				DPrintf("[term %d]: Raft[%d] successfully append entries to Raft[%d] with new nextIdx[%d] matchIdx[%d]", rf.currentTerm, rf.me, targetServer, rf.nextIndex[targetServer], rf.matchIndex[targetServer])
 			case false:
 				rf.nextIndex[targetServer] = Min(rf.nextIndex[targetServer], idx - 1)
 				if rf.needsReplication(targetServer) {
 					rf.replicationCond[targetServer].Broadcast()
 				}
-				DPrintf("[term %d]: Raft[%d] fails append entries to Raft[%d] with newNextIdx[%d]", rf.currentTerm, rf.me, targetServer, rf.nextIndex[targetServer])
 			}
 		}
 		rf.mu.Unlock()
@@ -675,7 +653,6 @@ func (rf *Raft) continueHeartBeat(oldTerm int) bool {
 // nextIndex: initialized to leader last log index + 1
 // matchIndex: initialized to -1
 func (rf *Raft) toLeader() {
-	DPrintf("[term %d]:Raft [%d] [state %s] becomes leader !", rf.currentTerm, rf.me, rf.serverType)
 	rf.serverType = leader
 	oldTerm := rf.currentTerm
 	go rf.startHeartBeat(oldTerm)
@@ -711,7 +688,6 @@ func (rf *Raft) updateCommitFollower(leaderCommit int, lastNewEntry int) {
 	originalCommit := rf.commitIndex
 	if leaderCommit > rf.commitIndex {
 		rf.commitIndex = Min(leaderCommit, lastNewEntry)
-		DPrintf("[term %d]:Raft [%d] [state %s] commitIndex is %d", rf.currentTerm, rf.me, rf.serverType, rf.commitIndex)
 		if rf.commitIndex > originalCommit {
 			rf.applyCond.Broadcast()
 		}
@@ -731,7 +707,6 @@ func (rf *Raft) updateCommitLeader() {
 		}
 		if rf.hasMajorVotes(count) && rf.logs[N].TermReceived == rf.currentTerm {
 			rf.commitIndex = N
-			DPrintf("[term %d]:Raft [%d] [state %s] commit log entry %d successfully", rf.currentTerm, rf.me, rf.serverType, N)
 			rf.applyCond.Broadcast()
 			break
 		}
@@ -742,9 +717,6 @@ func (rf *Raft) applyCommand(valid bool, command interface{}, index int) {
 	// apply command
 	applyMsg := ApplyMsg{CommandValid: valid, Command: command, CommandIndex: index + 1}
 	rf.applyCh <- applyMsg
-	rf.mu.Lock()
-	DPrintf("[term %d]:Raft [%d] [state %s] apply log entry %d to the service successfully", rf.currentTerm, rf.me, rf.serverType, rf.lastApplied)
-	rf.mu.Unlock()
 }
 
 // check status of entry(index, term) in logs:
