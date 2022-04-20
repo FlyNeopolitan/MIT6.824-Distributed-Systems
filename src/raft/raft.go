@@ -41,10 +41,10 @@ var (
 	candidate                  = "candidate"
 	leader                     = "leader"
 	ElectionTimeoutLowerBound  = 500  // ms
-	ElectionTimeoutUpperBound  = 1500 // ms
+	ElectionTimeoutUpperBound  = 1200 // ms
 	CandidateTimeoutLowerBound = 500  // ms
-	CandidateTimeoutUpperBound = 1500 // ms
-	HeartBeatsRate             = 200  // ms
+	CandidateTimeoutUpperBound = 1200 // ms
+	HeartBeatsRate             = 180  // ms
 	Max                        = func(a, b int) int { return int(math.Max(float64(a), float64(b))) }
 	Min                        = func(a, b int) int { return int(math.Min(float64(a), float64(b))) }
 	containEntry               = "containEntry"
@@ -266,8 +266,10 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int  // current Term, for leader to update itself
-	Success bool // true if follower contained entry matching prevLogIndex and pREVlOGtERM
+	Term          int  // current Term, for leader to update itself
+	Success       bool // true if follower contained entry matching prevLogIndex and prevLogTerm
+	ConflictIndex int  // index of conflict entry: for accelerated log backtracking optimization
+	ConflictTerm  int  // term  of conflict entry: for accelerated log backtracking optimization
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -286,7 +288,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Term = rf.currentTerm
 	}
 	// Start Appending
-	if CheckEntry(rf.logs, args.PrevLogIndex, args.PrevLogTerm) != containEntry {
+	if !preEntryMatch(rf.logs, args, reply) {
 		return
 	}
 	reply.Success = true
@@ -562,7 +564,7 @@ func (rf *Raft) AppendEntriesFor(isHeartBeat bool, targetServer int, term int) {
 				rf.matchIndex[targetServer] = idx + len(entries) - 1
 				rf.updateCommitLeader()
 			case false:
-				rf.nextIndex[targetServer] = Min(rf.nextIndex[targetServer], idx - 1)
+				rf.nextIndex[targetServer] = Min(rf.nextIndex[targetServer], getNextIdx(rf.logs, &reply))
 				if rf.needsReplication(targetServer) {
 					rf.replicationCond[targetServer].Broadcast()
 				}
@@ -570,6 +572,17 @@ func (rf *Raft) AppendEntriesFor(isHeartBeat bool, targetServer int, term int) {
 		}
 		rf.mu.Unlock()
 	}
+}
+
+func getNextIdx(logs []Log, reply *AppendEntriesReply) (nextIdx int) {
+	conflictIdx, conflictTerm := reply.ConflictIndex, reply.ConflictTerm
+	if conflictTerm > 0 {
+		if find := search(logs, conflictTerm, false, 0, len(logs) - 1); find >= 0 {
+			nextIdx = find + 1
+			return
+		}
+	}
+	return conflictIdx
 }
 
 /***************************** clock related functions ********************************/
@@ -719,6 +732,20 @@ func (rf *Raft) applyCommand(valid bool, command interface{}, index int) {
 	rf.applyCh <- applyMsg
 }
 
+func preEntryMatch(logs []Log, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	switch CheckEntry(logs, args.PrevLogIndex, args.PrevLogTerm) {
+	case missingEntry:
+		reply.ConflictIndex, reply.ConflictTerm = len(logs), 0
+		return false
+	case conflictEntry:
+		reply.ConflictTerm = logs[args.PrevLogIndex].TermReceived
+		reply.ConflictIndex = search(logs, reply.ConflictTerm, true, 0, args.PrevLogIndex)
+		return false
+	default:
+		return true
+	}
+}
+
 // check status of entry(index, term) in logs:
 // containEntry, conflictEntry or missingEntry
 func CheckEntry(logs []Log, index int, term int) string {
@@ -756,4 +783,42 @@ func (rf *Raft) logTermAt(i int) (int) {
 		return rf.logs[i].TermReceived
 	}
 	return 0
+}
+
+func search(logs []Log, term int, first bool, low int, high int) int {
+	bruteForce := func(low int, high int) int {
+		for i := len(logs) - 1; i >= 0; i-- {
+			log := logs[i]
+			if log.TermReceived == term && !first {
+				return i
+			}
+			if log.TermReceived == term && first {
+				if i - 1 >= 0 && logs[i - 1].TermReceived == term {
+					continue
+				}
+				return i
+			}
+		}
+		return -1
+	}
+	var binarySearch func(int, int) int
+	binarySearch = func(low int, high int) int {
+		if high - low <= 8 {
+			return bruteForce(low, high)
+		}
+		mid := (low + high) / 2
+		if logs[mid].TermReceived < term {
+			return binarySearch(mid + 1, high)
+		} 
+		if logs[mid].TermReceived > term {
+			return binarySearch(low, mid - 1)
+		} 
+		// logs[mid].TermReceived == term 
+		if first {
+			return binarySearch(low, mid)
+		} else {
+			return binarySearch(mid, high)
+		}
+	}
+	return binarySearch(low, high)
 }
