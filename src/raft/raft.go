@@ -21,6 +21,7 @@ import (
 	//"crypto/rand"
 	//"fmt"
 	//"fmt"
+	"bytes"
 	"math"
 	"sync"
 	"sync/atomic"
@@ -28,6 +29,7 @@ import (
 
 	"math/rand"
 
+	"../labgob"
 	"../labrpc"
 )
 
@@ -147,6 +149,13 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.logs)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -169,6 +178,18 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var CurrentTerm int
+	var VotedFor    int 
+	var Logs        []Log
+	if d.Decode(&CurrentTerm) != nil || d.Decode(&VotedFor) != nil || d.Decode(&Logs) != nil {
+		DPrintf("Error in decoding")
+	} else {
+		rf.currentTerm = CurrentTerm
+		rf.votedFor    = VotedFor
+		rf.logs        = Logs
+	}
 }
 
 //
@@ -206,6 +227,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if (rf.votedFor == -1) && rf.upToDate(args) {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandiateId
+		rf.persist()
 		rf.clock.reset() // restart your election timer when granting a vote to another peer.
 	} 
 	reply.Term = rf.currentTerm
@@ -310,6 +332,7 @@ loop:
 	logBefore, logAfter := rf.logs[:args.PrevLogIndex+1+numExists], rf.logs[args.PrevLogIndex+1+numExists:]
 	rf.logs = append(logBefore, args.Entries[numExists:]...)
 	rf.logs = append(rf.logs, logAfter...)
+	rf.persist()
 	rf.updateCommitFollower(args.LeaderCommit, lastNewEntry)
 }
 
@@ -342,6 +365,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	if isLeader {
 		rf.logs = append(rf.logs, Log{Command: command, TermReceived: rf.currentTerm})
+		rf.persist()
 		for peer := range rf.peers {
 			if peer != rf.me {
 				rf.replicationCond[peer].Broadcast()
@@ -431,6 +455,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		nextIndex: 	     make([]int, len(peers)),
 		matchIndex:      make([]int, len(peers)),
 	}
+	rf.readPersist(persister.ReadRaftState())
 	// Your initialization code here (2A, 2B, 2C).
 	rand.Seed(time.Now().UnixNano())
 	rf.applyCond = sync.NewCond(&rf.mu)
@@ -495,6 +520,7 @@ func (rf *Raft) startElection() {
 	oldTerm := rf.currentTerm
 	rf.votedFor = rf.me
 	lastLogIdx, lastLogTerm := rf.lastLog()
+	rf.persist()
 	rf.mu.Unlock()
 	// (4)
 	counts := 1
@@ -687,6 +713,7 @@ func (rf *Raft) toFollower(newTerm int) {
 		rf.clock.clean()
 	}
 	rf.serverType = follower
+	rf.persist()
 }
 
 // only follower or candidate can become candidate
