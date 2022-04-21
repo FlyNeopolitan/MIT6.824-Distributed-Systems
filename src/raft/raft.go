@@ -43,10 +43,10 @@ var (
 	candidate                  = "candidate"
 	leader                     = "leader"
 	ElectionTimeoutLowerBound  = 500  // ms
-	ElectionTimeoutUpperBound  = 1200 // ms
+	ElectionTimeoutUpperBound  = 1000 // ms
 	CandidateTimeoutLowerBound = 500  // ms
-	CandidateTimeoutUpperBound = 1200 // ms
-	HeartBeatsRate             = 180  // ms
+	CandidateTimeoutUpperBound = 1000 // ms
+	HeartBeatsRate             = 150  // ms
 	Max                        = func(a, b int) int { return int(math.Max(float64(a), float64(b))) }
 	Min                        = func(a, b int) int { return int(math.Min(float64(a), float64(b))) }
 	containEntry               = "containEntry"
@@ -329,10 +329,12 @@ loop:
 		}
 	}
 	lastNewEntry := args.PrevLogIndex + len(args.Entries)
-	logBefore, logAfter := rf.logs[:args.PrevLogIndex+1+numExists], rf.logs[args.PrevLogIndex+1+numExists:]
-	rf.logs = append(logBefore, args.Entries[numExists:]...)
-	rf.logs = append(rf.logs, logAfter...)
-	rf.persist()
+	if len(args.Entries) > 0 {
+		logBefore, logAfter := rf.logs[:args.PrevLogIndex + 1 + numExists], rf.logs[args.PrevLogIndex + 1 + numExists:]
+		rf.logs = append(logBefore, args.Entries[numExists:]...)
+		rf.logs = append(rf.logs, logAfter...)
+		rf.persist()
+	}
 	rf.updateCommitFollower(args.LeaderCommit, lastNewEntry)
 }
 
@@ -455,7 +457,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		nextIndex: 	     make([]int, len(peers)),
 		matchIndex:      make([]int, len(peers)),
 	}
-	rf.readPersist(persister.ReadRaftState())
 	// Your initialization code here (2A, 2B, 2C).
 	rand.Seed(time.Now().UnixNano())
 	rf.applyCond = sync.NewCond(&rf.mu)
@@ -463,10 +464,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		rf.replicationCond[i] = sync.NewCond(&rf.mu)
 	}
 	rf.clock.createClock()
-	go rf.timeoutCheck()
-	go rf.periodicApplyCheck()
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	// Every server needs to perform timeoutCheck and periodic apply check
+	go rf.timeoutCheck()
+	go rf.periodicApplyCheck()
 
 	return rf
 }
@@ -603,7 +605,8 @@ func (rf *Raft) AppendEntriesFor(isHeartBeat bool, targetServer int, term int) {
 func getNextIdx(logs []Log, reply *AppendEntriesReply) (nextIdx int) {
 	conflictIdx, conflictTerm := reply.ConflictIndex, reply.ConflictTerm
 	if conflictTerm > 0 {
-		if find := search(logs, conflictTerm, false, 0, len(logs) - 1); find >= 0 {
+		upper := Min(conflictIdx, len(logs) - 1)
+		if find := search(logs, conflictTerm, false, 0, upper); find >= 0 {
 			nextIdx = find + 1
 			return
 		}
@@ -653,7 +656,7 @@ func (clock *Clock) wait(timeLimit int) {
 	clock.ifClean = false
 	clock.clockTime = time.Now()
 	timeElapse := time.Since(clock.clockTime)
-	for timeElapse < time.Duration(timeLimit)*time.Millisecond && !clock.kill && !clock.ifClean {
+	for timeElapse < time.Duration(timeLimit) * time.Millisecond && !clock.kill && !clock.ifClean {
 		clock.clockCond.Wait()
 		timeElapse = time.Since(clock.clockTime)
 	}
@@ -707,13 +710,13 @@ func (rf *Raft) toFollower(newTerm int) {
 	/* to Follower */
 	if rf.currentTerm < newTerm {
 		rf.votedFor = -1
+		rf.currentTerm = newTerm
+		rf.persist()
 	}
-	rf.currentTerm = newTerm
 	if rf.serverType != follower {
 		rf.clock.clean()
 	}
 	rf.serverType = follower
-	rf.persist()
 }
 
 // only follower or candidate can become candidate
@@ -830,7 +833,7 @@ func search(logs []Log, term int, first bool, low int, high int) int {
 	}
 	var binarySearch func(int, int) int
 	binarySearch = func(low int, high int) int {
-		if high - low <= 8 {
+		if high - low <= 4 {
 			return bruteForce(low, high)
 		}
 		mid := (low + high) / 2
@@ -846,6 +849,9 @@ func search(logs []Log, term int, first bool, low int, high int) int {
 		} else {
 			return binarySearch(mid, high)
 		}
+	}
+	if logs[high].TermReceived == term && first {
+		return bruteForce(low, high)
 	}
 	return binarySearch(low, high)
 }
